@@ -1,0 +1,13 @@
+{
+  "": {
+    "dependencies": "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/release/ClipboardManager.build/ClipboardManager.d",
+    "object": "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/release/ClipboardManager.build/ClipboardManager.o",
+    "swift-dependencies": "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/release/ClipboardManager.build/master.swiftdeps"
+  },
+  "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/Sources/ClipboardManager/App.swift": {
+    "object": "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/release/ClipboardManager.build/App.swift.o",
+    "swiftmodule": "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/release/ClipboardManager.build/App~partial.swiftmodule",
+    "swift-dependencies": "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/release/ClipboardManager.build/App.swiftdeps",
+    "diagnostics": "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/release/ClipboardManager.build/App.dia"
+  }
+}
