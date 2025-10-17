@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import Foundation
 import Combine
+import Observation
 
 // MARK: - Data Models
 
@@ -152,6 +153,247 @@ class ClipboardMonitor {
     }
 }
 
+// MARK: - Popup Window Manager
+
+class PopupWindowManager {
+    private var popupWindow: NSWindow?
+    private weak var history: ClipboardHistory?
+
+    init(history: ClipboardHistory) {
+        self.history = history
+    }
+
+    func showPopup() {
+        guard let history = history else { return }
+
+        // Close existing popup if open
+        popupWindow?.close()
+
+        // Create hosting controller with popup view
+        let popupView = PopupView(history: history, onDismiss: { [weak self] in
+            self?.popupWindow?.close()
+            self?.popupWindow = nil
+        })
+        .environmentObject(history)
+
+        let hostingController = NSHostingController(rootView: popupView)
+        hostingController.view.frame = NSRect(x: 0, y: 0, width: 240, height: 190)
+
+        // Position near mouse cursor
+        let mouseLocation = NSEvent.mouseLocation
+        let frame = NSRect(x: mouseLocation.x - 120, y: mouseLocation.y - 200, width: 240, height: 190)
+
+        // Create panel (better for popups than regular window)
+        let panel = NSPanel(
+            contentRect: frame,
+            styleMask: [.nonactivatingPanel, .borderless],
+            backing: .buffered,
+            defer: false
+        )
+        panel.contentViewController = hostingController
+        panel.level = .popUpMenu
+        panel.isOpaque = false
+        panel.backgroundColor = NSColor.clear
+        panel.hasShadow = false  // We're adding custom shadows in SwiftUI
+        panel.collectionBehavior = [.canJoinAllSpaces, .transient, .fullScreenAuxiliary]
+        panel.isReleasedWhenClosed = false
+        panel.hidesOnDeactivate = false
+        panel.becomesKeyOnlyIfNeeded = true
+
+        // Show panel
+        panel.orderFrontRegardless()
+        panel.makeKey()
+
+        self.popupWindow = panel
+    }
+
+    func closePopup() {
+        popupWindow?.close()
+        popupWindow = nil
+    }
+}
+
+// MARK: - Popup View
+
+struct PopupView: View {
+    let history: ClipboardHistory
+    let onDismiss: () -> Void
+    @State private var hoveredItemId: UUID?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if history.items.isEmpty {
+                // Empty State
+                VStack(spacing: 8) {
+                    Image(systemName: "doc.text.magnifyingglass")
+                        .font(.system(size: 20))
+                        .foregroundColor(.secondary)
+
+                    Text("No items")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(.windowBackgroundColor))
+            } else {
+                // Items List
+                ScrollView(showsIndicators: true) {
+                    VStack(spacing: 1.5) {
+                        ForEach(Array(history.items.enumerated()), id: \.element.id) { index, item in
+                            PopupItemRow(
+                                item: item,
+                                index: index,
+                                isHovered: hoveredItemId == item.id,
+                                onHover: { hovered in
+                                    hoveredItemId = hovered ? item.id : nil
+                                },
+                                onSelect: {
+                                    copyItem(item)
+                                    onDismiss()
+                                }
+                            )
+                        }
+                    }
+                    .padding(4)
+                }
+                .background(Color(.windowBackgroundColor))
+            }
+        }
+        .frame(width: 240, height: 190)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color(.windowBackgroundColor))
+                .shadow(color: Color.black.opacity(0.18), radius: 12, x: 0, y: 4)
+                .shadow(color: Color.black.opacity(0.08), radius: 4, x: 0, y: 1)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+    }
+
+    private func copyItem(_ item: ClipboardItem) {
+        NSPasteboard.general.clearContents()
+        switch item.contentType {
+        case .text, .url:
+            NSPasteboard.general.setString(item.content, forType: .string)
+            if let rtfBase64 = item.rtfContent, let rtfData = Data(base64Encoded: rtfBase64) {
+                NSPasteboard.general.setData(rtfData, forType: .rtf)
+            }
+        case .image:
+            if let data = Data(base64Encoded: item.content),
+               let image = NSImage(data: data) {
+                NSPasteboard.general.writeObjects([image])
+            }
+        case .file:
+            NSPasteboard.general.setString(item.content, forType: .string)
+        }
+    }
+}
+
+struct PopupItemRow: View {
+    let item: ClipboardItem
+    let index: Int
+    let isHovered: Bool
+    let onHover: (Bool) -> Void
+    let onSelect: () -> Void
+
+    var contentIcon: String {
+        switch item.contentType {
+        case .text: return "doc.text.fill"
+        case .image: return "photo.fill"
+        case .url: return "link"
+        case .file: return "doc.fill"
+        }
+    }
+
+    var iconColor: Color {
+        switch item.contentType {
+        case .text: return .blue
+        case .image: return .purple
+        case .url: return .orange
+        case .file: return .green
+        }
+    }
+
+    var contentPreview: String {
+        switch item.contentType {
+        case .text:
+            let lines = item.content.components(separatedBy: .newlines)
+            let firstLine = lines.first ?? ""
+            return firstLine.count > 60 ? String(firstLine.prefix(60)) + "..." : firstLine
+        case .image: return item.filename ?? "Image"
+        case .url: return item.content
+        case .file: return item.filename ?? "File"
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            // Small icon
+            Circle()
+                .fill(iconColor.opacity(isHovered ? 0.2 : 0.15))
+                .frame(width: 6, height: 6)
+
+            // Content - just the text preview
+            Text(contentPreview)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(.primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            Spacer(minLength: 0)
+
+            // Copy indicator
+            if isHovered {
+                Image(systemName: "arrow.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(iconColor)
+                    .transition(.scale.combined(with: .opacity))
+            }
+        }
+        .padding(.horizontal, 5)
+        .padding(.vertical, 3)
+        .background(
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .fill(isHovered ? Color(.controlBackgroundColor).opacity(0.7) : Color(.controlBackgroundColor).opacity(0.3))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .strokeBorder(
+                    isHovered ? iconColor.opacity(0.4) : Color.clear,
+                    lineWidth: isHovered ? 1 : 0
+                )
+        )
+        .animation(.spring(response: 0.15, dampingFraction: 0.8), value: isHovered)
+        .onHover { hovering in
+            onHover(hovering)
+        }
+        .onTapGesture {
+            onSelect()
+        }
+        .contentShape(Rectangle())
+    }
+
+    private func relativeTime(from date: Date) -> String {
+        let seconds = Date().timeIntervalSince(date)
+
+        if seconds < 60 {
+            return "Just now"
+        } else if seconds < 3600 {
+            let minutes = Int(seconds / 60)
+            return "\(minutes)m ago"
+        } else if seconds < 86400 {
+            let hours = Int(seconds / 3600)
+            return "\(hours)h ago"
+        } else {
+            let days = Int(seconds / 86400)
+            return "\(days)d ago"
+        }
+    }
+}
+
 // MARK: - Menu Bar Manager
 
 class MenuBarManager {
@@ -255,10 +497,17 @@ class GlobalShortcutHandler {
     }
 
     private func handleGlobalKeyEvent(_ event: NSEvent) {
-        // Only handle if Cmd+Option is pressed
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let optionPressed = modifiers == .option
         let cmdAltPressed = modifiers.contains([.command, .option])
 
+        // Check for Option+V to show popup
+        if optionPressed, event.charactersIgnoringModifiers == "v" {
+            appDelegate?.showPopupWindow()
+            return
+        }
+
+        // Only handle if Cmd+Option is pressed for quick paste
         guard cmdAltPressed else { return }
 
         // Numbers 1-9 for quick paste
@@ -335,9 +584,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var mainWindow: NSWindow?
     var menuBarManager: MenuBarManager?
     var shortcutHandler: GlobalShortcutHandler?
+    var popupWindowManager: PopupWindowManager?
     var windowDelegate: MenuBarWindowDelegate?
     var localEventMonitor: Any?
     weak var history: ClipboardHistory?
+    private var hasAppliedPreferredSize = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         // Hide dock icon as early as possible
@@ -348,10 +599,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Hide dock icon
         NSApp.setActivationPolicy(.accessory)
 
-        // Setup menu bar
+        // Setup menu bar and keyboard shortcuts
         if let history = history {
             menuBarManager = MenuBarManager(history: history, appDelegate: self)
             shortcutHandler = GlobalShortcutHandler(history: history, appDelegate: self)
+            popupWindowManager = PopupWindowManager(history: history)
         }
 
         // Setup window delegate for all windows - do this after a small delay to ensure windows are ready
@@ -430,6 +682,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Store reference
         self.mainWindow = window
+
+        window.minSize = NSSize(width: 320, height: 260)
+
+        if !hasAppliedPreferredSize {
+            let preferredContentSize = NSSize(width: 340, height: 360)
+            window.setContentSize(preferredContentSize)
+            hasAppliedPreferredSize = true
+        }
     }
 
     @objc private func handleMiniaturizeButton(_ sender: Any?) {
@@ -454,6 +714,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.activate(ignoringOtherApps: true)
             self.mainWindow = window
         }
+    }
+
+    @objc func showPopupWindow() {
+        popupWindowManager?.showPopup()
     }
 }
 
@@ -482,29 +746,36 @@ struct ContentView: View {
 
             VStack(spacing: 0) {
                 // Header with title
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 8) {
                     Text("Clipboard History")
-                        .font(.system(size: 24, weight: .bold))
+                        .font(.system(size: 20, weight: .bold))
                         .foregroundColor(.primary)
 
                     // Search bar
-                    HStack(spacing: 10) {
+                    HStack(spacing: 8) {
                         Image(systemName: "magnifyingglass")
                             .foregroundColor(.secondary)
                         TextField("Search...", text: $searchText)
                             .textFieldStyle(.plain)
                     }
-                    .padding(10)
-                    .background(Color(.controlBackgroundColor))
-                    .cornerRadius(8)
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Color(.controlBackgroundColor).opacity(0.9))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                    )
                 }
-                .padding(16)
+                .padding(12)
 
                 // Content
                 if filteredItems.isEmpty {
-                    VStack(spacing: 16) {
+                    VStack(spacing: 14) {
                         Image(systemName: "doc.text.magnifyingglass")
-                            .font(.system(size: 56))
+                            .font(.system(size: 42))
                             .foregroundColor(.secondary)
 
                         Text("No items yet")
@@ -514,35 +785,33 @@ struct ContentView: View {
                         Text("Copy something to get started")
                             .font(.system(size: 14))
                             .foregroundColor(.secondary)
+
+                        Text("Use Command+Shift+K to clear history quickly.")
+                            .font(.system(size: 12))
+                            .foregroundColor(Color.secondary.opacity(0.8))
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     ScrollView {
-                        VStack(spacing: 8) {
+                        VStack(spacing: 6) {
                             ForEach(filteredItems) { item in
                                 ClipboardItemRow(item: item, history: history)
                             }
                         }
-                        .padding(12)
+                        .padding(8)
                     }
                 }
 
                 // Footer
                 HStack(spacing: 12) {
-                    Button(action: {
+                    Button(role: .destructive) {
                         history.clearHistory()
-                    }) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "trash")
-                            Text("Clear All")
-                        }
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.white)
-                        .padding(8)
-                        .background(Color.red)
-                        .cornerRadius(6)
+                    } label: {
+                        Label("Clear All", systemImage: "trash")
+                            .font(.system(size: 13, weight: .medium))
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.bordered)
+                    .tint(.red)
                     .keyboardShortcut("k", modifiers: [.command, .shift])
 
                     Spacer()
@@ -551,14 +820,18 @@ struct ContentView: View {
                         Text("\(history.items.count) items")
                             .font(.system(size: 12, weight: .medium))
                             .foregroundColor(.primary)
+
+                        Text("Command+Shift+K clears history")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
                     }
                 }
-                .padding(12)
+                .padding(10)
                 .background(Color(.controlBackgroundColor))
                 .borderTop()
             }
         }
-        .frame(minWidth: 420, minHeight: 350)
+        .frame(minWidth: 320, minHeight: 240)
     }
 }
 
@@ -659,7 +932,7 @@ struct ClipboardItemRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 12) {
+            HStack(spacing: 10) {
                 // Icon
                 ZStack {
                     Circle()
@@ -687,7 +960,7 @@ struct ClipboardItemRow: View {
                             .background(Color(.controlBackgroundColor))
                             .cornerRadius(4)
 
-                        Text(item.timestamp.formatted(date: .omitted, time: .standard))
+                        Text(item.timestamp.formatted(date: .omitted, time: .shortened))
                             .font(.system(size: 11))
                             .foregroundColor(.secondary)
 
@@ -713,7 +986,8 @@ struct ClipboardItemRow: View {
                     }
                     .buttonStyle(.plain)
                     .help("Paste to clipboard")
-                    .opacity(isHovered ? 1 : 0.6)
+                    .symbolRenderingMode(.monochrome)
+                    .opacity(isHovered ? 1 : 0.85)
 
                     Button(action: {
                         history.togglePin(for: item)
@@ -725,13 +999,20 @@ struct ClipboardItemRow: View {
                     }
                     .buttonStyle(.plain)
                     .help(item.isPinned ? "Unpin" : "Pin")
-                    .opacity(isHovered ? 1 : 0.6)
+                    .symbolRenderingMode(.monochrome)
+                    .opacity(isHovered ? 1 : 0.85)
                 }
             }
-            .padding(12)
+            .padding(10)
         }
-        .background(Color(.controlBackgroundColor))
-        .cornerRadius(8)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color(.controlBackgroundColor).opacity(isHovered ? 0.95 : 0.88))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.primary.opacity(isHovered ? 0.18 : 0.08), lineWidth: 1)
+        )
         .onHover { hovering in
             isHovered = hovering
         }
