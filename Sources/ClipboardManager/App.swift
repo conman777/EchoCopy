@@ -3,6 +3,7 @@ import AppKit
 import Foundation
 import Combine
 import Observation
+import ApplicationServices
 
 // MARK: - Data Models
 
@@ -158,6 +159,7 @@ class ClipboardMonitor {
 class PopupWindowManager {
     private var popupWindow: NSWindow?
     private weak var history: ClipboardHistory?
+    private var clickOutsideMonitor: Any?
 
     init(history: ClipboardHistory) {
         self.history = history
@@ -205,9 +207,29 @@ class PopupWindowManager {
         panel.makeKey()
 
         self.popupWindow = panel
+
+        // Monitor clicks outside the popup
+        clickOutsideMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            guard let self = self, let popupWindow = self.popupWindow else { return }
+
+            // Get mouse location in screen coordinates
+            let clickLocation = NSEvent.mouseLocation
+            let windowFrame = popupWindow.frame
+
+            // Check if click is outside popup window
+            if !windowFrame.contains(clickLocation) {
+                self.closePopup()
+            }
+        }
     }
 
     func closePopup() {
+        // Remove click monitor
+        if let monitor = clickOutsideMonitor {
+            NSEvent.removeMonitor(monitor)
+            clickOutsideMonitor = nil
+        }
+
         popupWindow?.close()
         popupWindow = nil
     }
@@ -491,6 +513,15 @@ class GlobalShortcutHandler {
     }
 
     private func setupGlobalShortcuts() {
+        // Check if we have accessibility permissions
+        let trusted = AXIsProcessTrusted()
+
+        if !trusted {
+            // Request permissions by showing system dialog
+            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
+            _ = AXIsProcessTrustedWithOptions(options as CFDictionary)
+        }
+
         eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             self?.handleGlobalKeyEvent(event)
         }
