@@ -4,6 +4,48 @@ import Foundation
 import Combine
 import Observation
 import ApplicationServices
+import os.log
+
+// MARK: - Constants
+
+enum AppConstants {
+    // Storage
+    static let maxHistoryItems = 500
+    static let storageKey = "clipboardHistory"
+
+    // Monitoring
+    static let clipboardCheckInterval: TimeInterval = 0.5
+
+    // Popup Window
+    static let popupWidth: CGFloat = 240
+    static let popupHeight: CGFloat = 190
+    static let popupMaxItems = 10
+
+    // Menu Bar
+    static let menuBarMaxItems = 10
+
+    // Main Window
+    static let mainWindowMinWidth: CGFloat = 320
+    static let mainWindowMinHeight: CGFloat = 260
+    static let mainWindowPreferredWidth: CGFloat = 340
+    static let mainWindowPreferredHeight: CGFloat = 360
+
+    // Content Truncation
+    static let menuItemPreviewLength = 40
+    static let popupItemPreviewLength = 60
+    static let mainWindowPreviewLength = 100
+}
+
+// MARK: - Logging
+
+extension Logger {
+    private static let subsystem = Bundle.main.bundleIdentifier ?? "com.clipboardmanager"
+
+    static let app = Logger(subsystem: subsystem, category: "app")
+    static let clipboard = Logger(subsystem: subsystem, category: "clipboard")
+    static let storage = Logger(subsystem: subsystem, category: "storage")
+    static let pasteboard = Logger(subsystem: subsystem, category: "pasteboard")
+}
 
 // MARK: - Data Models
 
@@ -34,10 +76,60 @@ struct ClipboardItem: Codable, Identifiable {
     }
 }
 
+// MARK: - Pasteboard Utilities
+
+struct PasteboardHelper {
+    /// Copies a clipboard item to the system pasteboard
+    /// - Parameter item: The clipboard item to copy
+    /// - Returns: True if successful, false otherwise
+    @discardableResult
+    static func copyToPasteboard(_ item: ClipboardItem) -> Bool {
+        NSPasteboard.general.clearContents()
+
+        switch item.contentType {
+        case .text, .url:
+            NSPasteboard.general.setString(item.content, forType: .string)
+
+            // Restore RTF formatting if available
+            if let rtfBase64 = item.rtfContent {
+                guard let rtfData = Data(base64Encoded: rtfBase64) else {
+                    Logger.pasteboard.error("Failed to decode RTF data from base64 for item: \(item.id)")
+                    return false
+                }
+                NSPasteboard.general.setData(rtfData, forType: .rtf)
+            }
+            Logger.pasteboard.debug("Copied text/URL item to pasteboard: \(item.id)")
+            return true
+
+        case .image:
+            guard let data = Data(base64Encoded: item.content) else {
+                Logger.pasteboard.error("Failed to decode image data from base64 for item: \(item.id)")
+                return false
+            }
+            guard let image = NSImage(data: data) else {
+                Logger.pasteboard.error("Failed to create NSImage from decoded data for item: \(item.id)")
+                return false
+            }
+            let success = NSPasteboard.general.writeObjects([image])
+            if success {
+                Logger.pasteboard.debug("Copied image item to pasteboard: \(item.id)")
+            } else {
+                Logger.pasteboard.error("Failed to write image to pasteboard for item: \(item.id)")
+            }
+            return success
+
+        case .file:
+            NSPasteboard.general.setString(item.content, forType: .string)
+            Logger.pasteboard.debug("Copied file item to pasteboard: \(item.id)")
+            return true
+        }
+    }
+}
+
 class ClipboardHistory: ObservableObject {
     @Published var items: [ClipboardItem] = []
-    private let maxItems = 500
-    private let storageKey = "clipboardHistory"
+    private let maxItems = AppConstants.maxHistoryItems
+    private let storageKey = AppConstants.storageKey
 
     init() {
         loadHistory()
@@ -65,7 +157,14 @@ class ClipboardHistory: ObservableObject {
 
     func togglePin(for item: ClipboardItem) {
         if let index = items.firstIndex(where: { $0.id == item.id }) {
-            let toggled = ClipboardItem(content: items[index].content, isPinned: !items[index].isPinned)
+            let currentItem = items[index]
+            let toggled = ClipboardItem(
+                content: currentItem.content,
+                contentType: currentItem.contentType,
+                isPinned: !currentItem.isPinned,
+                filename: currentItem.filename,
+                rtfContent: currentItem.rtfContent
+            )
             items[index] = toggled
             saveHistory()
         }
@@ -77,15 +176,27 @@ class ClipboardHistory: ObservableObject {
     }
 
     private func saveHistory() {
-        if let encoded = try? JSONEncoder().encode(items) {
+        do {
+            let encoded = try JSONEncoder().encode(items)
             UserDefaults.standard.set(encoded, forKey: storageKey)
+            Logger.storage.debug("Saved \(self.items.count) items to UserDefaults")
+        } catch {
+            Logger.storage.error("Failed to encode clipboard history: \(error.localizedDescription)")
         }
     }
 
     private func loadHistory() {
-        if let data = UserDefaults.standard.data(forKey: storageKey),
-           let decoded = try? JSONDecoder().decode([ClipboardItem].self, from: data) {
+        guard let data = UserDefaults.standard.data(forKey: storageKey) else {
+            Logger.storage.info("No saved clipboard history found")
+            return
+        }
+
+        do {
+            let decoded = try JSONDecoder().decode([ClipboardItem].self, from: data)
             items = decoded
+            Logger.storage.info("Loaded \(self.items.count) items from UserDefaults")
+        } catch {
+            Logger.storage.error("Failed to decode clipboard history: \(error.localizedDescription)")
         }
     }
 }
@@ -96,7 +207,7 @@ class ClipboardMonitor {
     private var timer: Timer?
     private var lastChangeCount: Int = 0
     private let history: ClipboardHistory
-    private let checkInterval: TimeInterval = 0.5
+    private let checkInterval: TimeInterval = AppConstants.clipboardCheckInterval
 
     init(history: ClipboardHistory) {
         self.history = history
@@ -107,11 +218,13 @@ class ClipboardMonitor {
         timer = Timer.scheduledTimer(withTimeInterval: checkInterval, repeats: true) { [weak self] _ in
             self?.checkClipboard()
         }
+        Logger.clipboard.info("Clipboard monitoring started")
     }
 
     func stop() {
         timer?.invalidate()
         timer = nil
+        Logger.clipboard.info("Clipboard monitoring stopped")
     }
 
     private func checkClipboard() {
@@ -130,10 +243,13 @@ class ClipboardMonitor {
 
             // Check for image
             if let image = pasteboard.readObjects(forClasses: [NSImage.self]) as? [NSImage], let nsImage = image.first {
-                if let tiffData = nsImage.tiffRepresentation {
-                    let base64 = tiffData.base64EncodedString().split(separator: Character("\n")).joined()
-                    history.addItem(base64, contentType: .image, filename: "image.png")
+                guard let tiffData = nsImage.tiffRepresentation else {
+                    Logger.clipboard.warning("Failed to get TIFF representation of clipboard image")
+                    return
                 }
+                let base64 = tiffData.base64EncodedString().split(separator: Character("\n")).joined()
+                history.addItem(base64, contentType: .image, filename: "image.png")
+                Logger.clipboard.debug("Added image to clipboard history (size: \(tiffData.count) bytes)")
                 return
             }
 
@@ -179,11 +295,16 @@ class PopupWindowManager {
         .environmentObject(history)
 
         let hostingController = NSHostingController(rootView: popupView)
-        hostingController.view.frame = NSRect(x: 0, y: 0, width: 240, height: 190)
+        hostingController.view.frame = NSRect(x: 0, y: 0, width: AppConstants.popupWidth, height: AppConstants.popupHeight)
 
         // Position near mouse cursor
         let mouseLocation = NSEvent.mouseLocation
-        let frame = NSRect(x: mouseLocation.x - 120, y: mouseLocation.y - 200, width: 240, height: 190)
+        let frame = NSRect(
+            x: mouseLocation.x - AppConstants.popupWidth / 2,
+            y: mouseLocation.y - AppConstants.popupHeight - 10,
+            width: AppConstants.popupWidth,
+            height: AppConstants.popupHeight
+        )
 
         // Create panel (better for popups than regular window)
         let panel = NSPanel(
@@ -281,7 +402,7 @@ struct PopupView: View {
                 .background(Color(.windowBackgroundColor))
             }
         }
-        .frame(width: 240, height: 190)
+        .frame(width: AppConstants.popupWidth, height: AppConstants.popupHeight)
         .background(
             RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .fill(Color(.windowBackgroundColor))
@@ -296,21 +417,7 @@ struct PopupView: View {
     }
 
     private func copyItem(_ item: ClipboardItem) {
-        NSPasteboard.general.clearContents()
-        switch item.contentType {
-        case .text, .url:
-            NSPasteboard.general.setString(item.content, forType: .string)
-            if let rtfBase64 = item.rtfContent, let rtfData = Data(base64Encoded: rtfBase64) {
-                NSPasteboard.general.setData(rtfData, forType: .rtf)
-            }
-        case .image:
-            if let data = Data(base64Encoded: item.content),
-               let image = NSImage(data: data) {
-                NSPasteboard.general.writeObjects([image])
-            }
-        case .file:
-            NSPasteboard.general.setString(item.content, forType: .string)
-        }
+        PasteboardHelper.copyToPasteboard(item)
     }
 }
 
@@ -344,7 +451,9 @@ struct PopupItemRow: View {
         case .text:
             let lines = item.content.components(separatedBy: .newlines)
             let firstLine = lines.first ?? ""
-            return firstLine.count > 60 ? String(firstLine.prefix(60)) + "..." : firstLine
+            return firstLine.count > AppConstants.popupItemPreviewLength
+                ? String(firstLine.prefix(AppConstants.popupItemPreviewLength)) + "..."
+                : firstLine
         case .image: return item.filename ?? "Image"
         case .url: return item.content
         case .file: return item.filename ?? "File"
@@ -397,23 +506,6 @@ struct PopupItemRow: View {
         }
         .contentShape(Rectangle())
     }
-
-    private func relativeTime(from date: Date) -> String {
-        let seconds = Date().timeIntervalSince(date)
-
-        if seconds < 60 {
-            return "Just now"
-        } else if seconds < 3600 {
-            let minutes = Int(seconds / 60)
-            return "\(minutes)m ago"
-        } else if seconds < 86400 {
-            let hours = Int(seconds / 3600)
-            return "\(hours)h ago"
-        } else {
-            let days = Int(seconds / 86400)
-            return "\(days)d ago"
-        }
-    }
 }
 
 // MARK: - Menu Bar Manager
@@ -457,10 +549,10 @@ class MenuBarManager {
             guard let history = self?.history else { return }
             guard let strongSelf = self else { return }
 
-            // Show top 10 items
-            let topItems = Array(history.items.prefix(10))
+            // Show top items
+            let topItems = Array(history.items.prefix(AppConstants.menuBarMaxItems))
             for (index, item) in topItems.enumerated() {
-                let preview = String(item.content.prefix(40))
+                let preview = String(item.content.prefix(AppConstants.menuItemPreviewLength))
                 let title = "\(index + 1). \(preview)..."
                 let menuItem = NSMenuItem(title: title, action: #selector(MenuBarManager.pasteItem(_:)), keyEquivalent: "")
                 menuItem.representedObject = item
@@ -493,8 +585,7 @@ class MenuBarManager {
 
     @objc private func pasteItem(_ sender: NSMenuItem) {
         if let item = sender.representedObject as? ClipboardItem {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(item.content, forType: .string)
+            PasteboardHelper.copyToPasteboard(item)
         }
     }
 }
@@ -517,9 +608,12 @@ class GlobalShortcutHandler {
         let trusted = AXIsProcessTrusted()
 
         if !trusted {
+            Logger.app.warning("Accessibility permissions not granted - requesting permissions")
             // Request permissions by showing system dialog
             let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
             _ = AXIsProcessTrustedWithOptions(options as CFDictionary)
+        } else {
+            Logger.app.info("Accessibility permissions granted - global shortcuts enabled")
         }
 
         eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
@@ -534,6 +628,7 @@ class GlobalShortcutHandler {
 
         // Check for Option+V to show popup
         if optionPressed, event.charactersIgnoringModifiers == "v" {
+            Logger.app.debug("Option+V shortcut triggered - showing popup")
             appDelegate?.showPopupWindow()
             return
         }
@@ -544,6 +639,7 @@ class GlobalShortcutHandler {
         // Numbers 1-9 for quick paste
         if let character = event.charactersIgnoringModifiers?.first,
            let digit = Int(String(character)), digit >= 1, digit <= 9 {
+            Logger.app.debug("Cmd+Option+\(digit) shortcut triggered - quick pasting item")
             pasteQuickItem(at: digit - 1)
         }
     }
@@ -553,19 +649,7 @@ class GlobalShortcutHandler {
         guard index >= 0 && index < history.items.count else { return }
 
         let item = history.items[index]
-
-        NSPasteboard.general.clearContents()
-        switch item.contentType {
-        case .text, .url:
-            NSPasteboard.general.setString(item.content, forType: .string)
-        case .image:
-            if let data = Data(base64Encoded: item.content),
-               let image = NSImage(data: data) {
-                NSPasteboard.general.writeObjects([image])
-            }
-        case .file:
-            NSPasteboard.general.setString(item.content, forType: .string)
-        }
+        PasteboardHelper.copyToPasteboard(item)
     }
 
     deinit {
@@ -714,10 +798,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Store reference
         self.mainWindow = window
 
-        window.minSize = NSSize(width: 320, height: 260)
+        window.minSize = NSSize(width: AppConstants.mainWindowMinWidth, height: AppConstants.mainWindowMinHeight)
 
         if !hasAppliedPreferredSize {
-            let preferredContentSize = NSSize(width: 340, height: 360)
+            let preferredContentSize = NSSize(
+                width: AppConstants.mainWindowPreferredWidth,
+                height: AppConstants.mainWindowPreferredHeight
+            )
             window.setContentSize(preferredContentSize)
             hasAppliedPreferredSize = true
         }
@@ -862,7 +949,7 @@ struct ContentView: View {
                 .borderTop()
             }
         }
-        .frame(minWidth: 320, minHeight: 240)
+        .frame(minWidth: AppConstants.mainWindowMinWidth, minHeight: AppConstants.mainWindowMinHeight)
     }
 }
 
@@ -938,7 +1025,9 @@ struct ClipboardItemRow: View {
     var contentPreview: String {
         switch item.contentType {
         case .text:
-            return item.content.count > 100 ? String(item.content.prefix(100)) + "..." : item.content
+            return item.content.count > AppConstants.mainWindowPreviewLength
+                ? String(item.content.prefix(AppConstants.mainWindowPreviewLength)) + "..."
+                : item.content
         case .image:
             return "[Image]"
         case .url:
@@ -1051,24 +1140,7 @@ struct ClipboardItemRow: View {
     }
 
     private func pasteItem() {
-        NSPasteboard.general.clearContents()
-
-        switch item.contentType {
-        case .text, .url:
-            NSPasteboard.general.setString(item.content, forType: .string)
-
-            // Restore RTF formatting if available
-            if let rtfBase64 = item.rtfContent, let rtfData = Data(base64Encoded: rtfBase64) {
-                NSPasteboard.general.setData(rtfData, forType: .rtf)
-            }
-        case .image:
-            if let data = Data(base64Encoded: item.content),
-               let image = NSImage(data: data) {
-                NSPasteboard.general.writeObjects([image])
-            }
-        case .file:
-            NSPasteboard.general.setString(item.content, forType: .string)
-        }
+        PasteboardHelper.copyToPasteboard(item)
     }
 }
 
