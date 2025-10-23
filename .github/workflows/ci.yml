@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  build:
+    name: Build and Test
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install swiftformat swiftlint
+
+      - name: Check Swift version
+        run: swift --version
+
+      - name: Format check
+        run: swiftformat --lint Sources/
+        continue-on-error: true
+
+      - name: Lint check
+        run: swiftlint lint
+        continue-on-error: true
+
+      - name: Build (Debug)
+        run: swift build
+
+      - name: Build (Release)
+        run: swift build -c release
+
+      - name: Check binary
+        run: |
+          if [ -f .build/release/ClipboardManager ]; then
+            echo "✅ Release binary created"
+            ls -lh .build/release/ClipboardManager
+          else
+            echo "❌ Release binary not found"
+            exit 1
+          fi
+
+  code-quality:
+    name: Code Quality
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install SwiftLint
+        run: brew install swiftlint
+
+      - name: Run SwiftLint
+        run: swiftlint lint --reporter markdown > swiftlint-report.md
+        continue-on-error: true
+
+      - name: Check for major issues
+        run: |
+          if swiftlint lint | grep -q "error:"; then
+            echo "❌ Critical lint issues found"
+            swiftlint lint
+            exit 1
+          fi
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: macos-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Release Binary
+        run: swift build -c release
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: .build/release/ClipboardManager
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

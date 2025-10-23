@@ -1,0 +1,86 @@
+# SwiftLint Configuration
+# Enforces Swift code quality and style standards
+
+# Disabled rules (if any specific ones need disabling)
+disabled_rules:
+  - trailing_whitespace  # Can be auto-fixed by formatter
+
+# Opt-in rules to enable
+opt_in_rules:
+  - empty_count
+  - explicit_init
+  - first_where
+  - identical_operands
+  - let_var_order
+  - operator_usage_whitespace
+  - overridden_super_call
+  - pattern_matching_keywords
+  - redundant_nil_coalescing
+  - sorted_imports
+  - unused_import
+  - unused_declaration
+
+# Line length
+line_length:
+  warning: 120
+  error: 150
+
+# Cyclomatic complexity - functions should do one thing
+cyclomatic_complexity:
+  warning: 10
+  error: 20
+
+# Function parameter count
+function_parameter_count:
+  warning: 5
+  error: 7
+
+# Type body length
+type_body_length:
+  warning: 200
+  error: 300
+
+# File length
+file_length:
+  warning: 400
+  error: 500
+
+# Identifier name rules
+identifier_name:
+  min_length: 2
+  max_length: 45
+  allowed_symbols: "_"
+  excluded:
+    - id
+    - x
+    - y
+    - z
+
+# Trailing comma rule
+trailing_comma:
+  mandatory_comma: false
+
+# Naming conventions
+naming_rules:
+  - enum_case: error
+  - type_name: error
+  - variable_name: error
+  - constant_name: error
+
+# Excluded paths
+excluded:
+  - .build
+  - .swiftpm
+  - Pods
+
+# Strict mode
+strict: true
+
+# Implicit getters in computed properties
+implicit_getter: false
+
+# Force unwrapping
+force_unwrapping: warning
+
+# Multiple closures on same line
+multiple_closures_with_trailing_closure: true

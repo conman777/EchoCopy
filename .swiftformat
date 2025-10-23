@@ -1,0 +1,32 @@
+# SwiftFormat Configuration
+# Enforces consistent Swift code formatting
+
+# Line length
+--linewidth 120
+
+# Indentation
+--indent 4
+--indentcase false
+
+# Spacing
+--spaces 4
+--tabwidth 4
+
+# Imports
+--importgrouping testable-first
+
+# Braces and structure
+--allman false
+--closingparen balanced
+--commas inline
+
+# Operators
+--operatorfunc spaced
+--wraparguments before-first
+
+# Options
+--selfrequired
+--stripunusedargs closure-only
+
+# Enabled rules (comment out to disable)
+--enable all

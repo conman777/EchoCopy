@@ -1,0 +1,71 @@
+#!/bin/bash
+# Pre-commit hook: Run code quality checks before allowing commit
+
+set -e
+
+echo "🔍 Running pre-commit checks..."
+echo ""
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+FAILED=0
+
+# Check 1: Format validation
+echo "📝 Checking code formatting..."
+if ! command -v swiftformat &> /dev/null; then
+    echo -e "${YELLOW}⚠️  SwiftFormat not installed, skipping format check${NC}"
+else
+    if swiftformat --lint Sources/ > /dev/null 2>&1; then
+        echo -e "${GREEN}✅ Code formatting OK${NC}"
+    else
+        echo -e "${RED}❌ Code formatting issues found${NC}"
+        echo "   Run: swiftformat Sources/"
+        FAILED=1
+    fi
+fi
+
+echo ""
+
+# Check 2: Lint validation
+echo "🔎 Checking code quality..."
+if ! command -v swiftlint &> /dev/null; then
+    echo -e "${YELLOW}⚠️  SwiftLint not installed, skipping lint check${NC}"
+else
+    if swiftlint lint --strict > /dev/null 2>&1; then
+        echo -e "${GREEN}✅ Lint checks passed${NC}"
+    else
+        echo -e "${RED}❌ Lint warnings found${NC}"
+        echo "   Run: swiftlint lint"
+        FAILED=1
+    fi
+fi
+
+echo ""
+
+# Check 3: Build validation
+echo "🔨 Checking if project builds..."
+if swift build > /dev/null 2>&1; then
+    echo -e "${GREEN}✅ Project builds successfully${NC}"
+else
+    echo -e "${RED}❌ Build failed${NC}"
+    echo "   Run: swift build"
+    FAILED=1
+fi
+
+echo ""
+
+# Final result
+if [ $FAILED -eq 0 ]; then
+    echo -e "${GREEN}✅ All pre-commit checks passed!${NC}"
+    exit 0
+else
+    echo -e "${RED}❌ Pre-commit checks failed${NC}"
+    echo ""
+    echo "💡 Fix the issues above and try again."
+    echo "   To bypass (not recommended): git commit --no-verify"
+    exit 1
+fi
