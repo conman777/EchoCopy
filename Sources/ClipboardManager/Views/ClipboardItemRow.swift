@@ -9,11 +9,24 @@ struct ClipboardItemRow: View {
     @State private var isHovered = false
 
     private var previewText: String {
-        let trimmed = item.content
-            .replacingOccurrences(of: "\n", with: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return "[Empty]" }
-        return trimmed.count > 120 ? "\(trimmed.prefix(120))…" : trimmed
+        switch item.contentType {
+        case .text, .url:
+            let trimmed = item.content
+                .replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return "[Empty]" }
+            return trimmed.count > 120 ? "\(trimmed.prefix(120))…" : trimmed
+        case .file:
+            if let filename = item.filename, !filename.isEmpty {
+                return "[File] \(filename)"
+            }
+            return "[File]"
+        case .image:
+            if let filename = item.filename, !filename.isEmpty {
+                return "[Image] \(filename)"
+            }
+            return "[Image] Screenshot"
+        }
     }
 
     var body: some View {

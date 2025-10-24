@@ -66,9 +66,9 @@ class ClipboardHistory: ObservableObject {
         saveHistory()
     }
 
-    /// Clear all items from history
+    /// Clear all unpinned items from history
     func clearHistory() {
-        items.removeAll()
+        items = items.filter { $0.isPinned }
         saveHistory()
     }
 

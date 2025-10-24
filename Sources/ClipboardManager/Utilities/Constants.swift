@@ -23,4 +23,18 @@ enum Constants {
     enum Accessibility {
         static let clipboardManagerDescription = "ClipboardManager"
     }
+
+    /// Screenshot monitoring
+    enum ScreenshotMonitor {
+        /// Interval (in seconds) for checking for new screenshots
+        static let checkInterval: TimeInterval = 2.0
+
+        /// Maximum age (in seconds) for a screenshot to be auto-copied
+        /// Prevents copying old screenshots on app launch
+        static let maxFileAge: TimeInterval = 10.0
+
+        /// Minimum age (in seconds) before treating a screenshot as ready
+        /// Gives macOS time to finish writing the file to disk
+        static let minReadyAge: TimeInterval = 0.5
+    }
 }

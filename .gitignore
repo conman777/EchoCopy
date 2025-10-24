@@ -1,0 +1,28 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Xcode
+xcuserdata/
+*.xcodeproj/
+*.xcworkspace
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDEs
+.vscode/
+.idea/
+
+# Build artifacts
+*.swiftmodule
+*.swiftdoc
+*.swiftsourceinfo
+*.dSYM/
+
+# Keep assets for documentation
+!assets/
+!assets/**/*

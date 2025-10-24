@@ -27,6 +27,9 @@ struct ClipboardManagerApp: App {
 
         clipboardMonitor = ClipboardMonitor(history: historyInstance)
         appDelegate.history = historyInstance
+
+        // Start clipboard monitoring
+        // Note: Screenshot monitoring is started by AppDelegate
         clipboardMonitor.start()
     }
 }

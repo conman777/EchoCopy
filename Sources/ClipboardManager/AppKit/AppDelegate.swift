@@ -6,6 +6,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var menuBarManager: MenuBarManager?
     var shortcutHandler: GlobalShortcutHandler?
     var popupWindowManager: PopupWindowManager?
+    var screenshotMonitor: ScreenshotMonitor?
     var windowDelegate: MenuBarWindowDelegate?
     var localEventMonitor: Any?
     weak var history: ClipboardHistory?
@@ -28,6 +29,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             shortcutHandler = GlobalShortcutHandler(history: history, appDelegate: self)
             popupWindowManager = PopupWindowManager(history: history)
         }
+
+        // Start screenshot monitoring
+        screenshotMonitor = ScreenshotMonitor()
+        screenshotMonitor?.startMonitoring()
 
         // Setup window delegate for all windows - do this after a small delay to ensure windows are ready
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
