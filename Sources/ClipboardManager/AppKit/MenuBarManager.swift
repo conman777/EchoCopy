@@ -30,10 +30,14 @@ class MenuBarManager {
     }
 
     private func setupHistoryObserver() {
-        // Subscribe to changes in the history
-        historySubscription = history?.objectWillChange.sink { [weak self] in
-            self?.updateMenu()
-        }
+        guard let history = history else { return }
+
+        // Subscribe directly to published history items so we refresh after changes land
+        historySubscription = history.$items
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.updateMenu()
+            }
     }
 
     // MARK: - Private: Menu Updates
@@ -48,8 +52,7 @@ class MenuBarManager {
             // Show top 10 items
             let topItems = Array(history.items.prefix(10))
             for (index, item) in topItems.enumerated() {
-                let preview = String(item.content.prefix(40))
-                let title = "\(index + 1). \(preview)..."
+                let title = strongSelf.menuTitle(for: item, index: index)
                 let menuItem = NSMenuItem(title: title, action: #selector(MenuBarManager.pasteItem(_:)), keyEquivalent: "")
                 menuItem.representedObject = item
                 menuItem.target = strongSelf
@@ -86,5 +89,33 @@ class MenuBarManager {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(item.content, forType: .string)
         }
+    }
+
+    // MARK: - Private: Helpers
+
+    private func menuTitle(for item: ClipboardItem, index: Int) -> String {
+        let preview: String
+
+        switch item.contentType {
+        case .text, .url:
+            preview = truncatedPreview(from: item.content, limit: 40)
+        case .image:
+            preview = item.filename ?? "Image"
+        case .file:
+            preview = item.filename ?? "File"
+        }
+
+        return "\(index + 1). \(preview)"
+    }
+
+    private func truncatedPreview(from text: String, limit: Int) -> String {
+        let sanitized = text.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard sanitized.count > limit else {
+            return sanitized
+        }
+
+        let prefix = sanitized.prefix(limit)
+        return "\(prefix)…"
     }
 }
