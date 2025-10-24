@@ -105,7 +105,9 @@ class MenuBarManager {
             preview = item.filename ?? "File"
         }
 
-        return "\(index + 1). \(preview)"
+        let pinnedMarker = item.isPinned ? "📌 " : ""
+        let shortcutHint = index < 9 ? "⌥\(index + 1) • " : ""
+        return "\(shortcutHint)\(pinnedMarker)\(preview)"
     }
 
     private func truncatedPreview(from text: String, limit: Int) -> String {

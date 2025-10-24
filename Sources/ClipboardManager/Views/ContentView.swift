@@ -1,122 +1,134 @@
 import SwiftUI
 
-/// Main content view for the clipboard history manager
+/// Main clipboard history screen with a simple single-line list layout.
 struct ContentView: View {
     @EnvironmentObject var history: ClipboardHistory
     @State private var searchText = ""
+    @State private var showPinnedOnly = false
 
-    var filteredItems: [ClipboardItem] {
-        if searchText.isEmpty {
-            return history.items
+    private var filteredItems: [ClipboardItem] {
+        let baseItems = showPinnedOnly ? history.items.filter { $0.isPinned } : history.items
+        let trimmedQuery = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedQuery.isEmpty else {
+            return baseItems
         }
-        return history.items.filter { $0.content.localizedCaseInsensitiveContains(searchText) }
+
+        let lowercasedQuery = trimmedQuery.lowercased()
+
+        return baseItems.filter { item in
+            if item.content.lowercased().contains(lowercasedQuery) {
+                return true
+            }
+
+            if let filename = item.filename?.lowercased(), filename.contains(lowercasedQuery) {
+                return true
+            }
+
+            return false
+        }
     }
 
     var body: some View {
         ZStack {
-            Color(.windowBackgroundColor).ignoresSafeArea()
+            Color(.windowBackgroundColor)
+                .ignoresSafeArea()
                 .background(WindowAccessor { window in
-                    // Ensure our AppKit configuration is applied to the exact SwiftUI window
                     if let app = NSApp.delegate as? AppDelegate {
                         app.applyWindowBehavior(to: window)
                     }
                 })
 
             VStack(spacing: 0) {
-                // Header with title
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Clipboard History")
-                        .font(.system(size: 20, weight: .bold))
-                        .foregroundColor(.primary)
+                headerView
 
-                    // Search bar
-                    HStack(spacing: 8) {
-                        Image(systemName: "magnifyingglass")
-                            .foregroundColor(.secondary)
-                        TextField("Search...", text: $searchText)
-                            .textFieldStyle(.plain)
-                    }
-                    .padding(.vertical, 6)
-                    .padding(.horizontal, 10)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(Color(.controlBackgroundColor).opacity(0.9))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-                    )
-                }
-                .padding(12)
+                Divider()
 
-                // Content
                 if filteredItems.isEmpty {
                     emptyStateView
                 } else {
-                    ScrollView {
-                        VStack(spacing: 6) {
-                            ForEach(filteredItems) { item in
-                                ClipboardItemRow(item: item, history: history)
-                            }
-                        }
-                        .padding(8)
-                    }
+                    listView
                 }
 
-                // Footer
                 footerView
             }
         }
-        .frame(minWidth: 320, minHeight: 240)
+        .frame(minWidth: 340, minHeight: 320)
+    }
+
+    private var headerView: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Clipboard History")
+                .font(.system(size: 20, weight: .semibold))
+
+            HStack(spacing: 12) {
+                TextField("Search…", text: $searchText)
+                    .textFieldStyle(.roundedBorder)
+                    .disableAutocorrection(true)
+
+                Toggle(isOn: $showPinnedOnly) {
+                    Label("Pinned only", systemImage: "pin")
+                        .labelStyle(.titleAndIcon)
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background(Color(.controlBackgroundColor).opacity(0.92))
+    }
+
+    private var listView: some View {
+        List {
+            ForEach(filteredItems) { item in
+                ClipboardItemRow(item: item, history: history)
+                    .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+                    .listRowBackground(Color(.windowBackgroundColor))
+            }
+        }
+        .listStyle(.plain)
     }
 
     private var emptyStateView: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "doc.text.magnifyingglass")
-                .font(.system(size: 42))
+        VStack(spacing: 12) {
+            Image(systemName: "doc.on.clipboard")
+                .font(.system(size: 36))
                 .foregroundColor(.secondary)
 
-            Text("No items yet")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundColor(.primary)
+            Text("Nothing copied yet")
+                .font(.system(size: 15, weight: .semibold))
 
-            Text("Copy something to get started")
-                .font(.system(size: 14))
-                .foregroundColor(.secondary)
-
-            Text("Use Command+Shift+K to clear history quickly.")
+            Text("Copy some text or files and they will show up here automatically.")
                 .font(.system(size: 12))
-                .foregroundColor(Color.secondary.opacity(0.8))
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var footerView: some View {
-        HStack(spacing: 12) {
+        HStack {
+            Label("\(history.items.count) items stored", systemImage: "tray.full")
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+
+            Spacer()
+
             Button(role: .destructive) {
                 history.clearHistory()
             } label: {
                 Label("Clear All", systemImage: "trash")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 12, weight: .semibold))
             }
             .buttonStyle(.bordered)
             .tint(.red)
+            .disabled(history.items.isEmpty)
             .keyboardShortcut("k", modifiers: [.command, .shift])
-
-            Spacer()
-
-            VStack(alignment: .trailing, spacing: 2) {
-                Text("\(history.items.count) items")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(.primary)
-
-                Text("Command+Shift+K clears history")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-            }
         }
-        .padding(10)
-        .background(Color(.controlBackgroundColor))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Color(.controlBackgroundColor).opacity(0.9))
         .borderTop()
     }
 }

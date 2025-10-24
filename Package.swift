@@ -48,9 +48,6 @@ let package = Package(
         .executableTarget(
             name: "ClipboardManager",
             dependencies: [],
-            resources: [
-                .process("Info.plist")
-            ],
             swiftSettings: [
                 // Strict mode for type checking
                 .unsafeFlags(["-strict-concurrency=complete"]),

@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Single item row in the popup window
+/// Tile used in the quick-access popup palette
 struct PopupItemRow: View {
     let item: ClipboardItem
     let index: Int
@@ -8,16 +8,7 @@ struct PopupItemRow: View {
     let onHover: (Bool) -> Void
     let onSelect: () -> Void
 
-    var contentIcon: String {
-        switch item.contentType {
-        case .text: return "doc.text.fill"
-        case .image: return "photo.fill"
-        case .url: return "link"
-        case .file: return "doc.fill"
-        }
-    }
-
-    var iconColor: Color {
+    private var accentColor: Color {
         switch item.contentType {
         case .text: return .blue
         case .image: return .purple
@@ -26,62 +17,101 @@ struct PopupItemRow: View {
         }
     }
 
-    var contentPreview: String {
+    private var iconName: String {
         switch item.contentType {
-        case .text:
-            let lines = item.content.components(separatedBy: .newlines)
-            let firstLine = lines.first ?? ""
-            return firstLine.count > 60 ? String(firstLine.prefix(60)) + "..." : firstLine
-        case .image: return item.filename ?? "Image"
-        case .url: return item.content
-        case .file: return item.filename ?? "File"
+        case .text: return "doc.text"
+        case .image: return "photo"
+        case .url: return "link"
+        case .file: return "doc"
         }
     }
 
+    private var preview: String {
+        let trimmed = item.content
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "[Empty]" }
+        return trimmed.count > 80 ? "\(trimmed.prefix(80))…" : trimmed
+    }
+
+    private var keyboardHint: String {
+        index < 9 ? "⌥\(index + 1)" : ""
+    }
+
     var body: some View {
-        HStack(spacing: 4) {
-            // Small icon
-            Circle()
-                .fill(iconColor.opacity(isHovered ? 0.2 : 0.15))
-                .frame(width: 6, height: 6)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                HStack(spacing: 6) {
+                    Image(systemName: iconName)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(accentColor)
+                    Text(preview)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.primary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                }
 
-            // Content - just the text preview
-            Text(contentPreview)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(.primary)
-                .lineLimit(1)
-                .truncationMode(.tail)
+                Spacer()
 
-            Spacer(minLength: 0)
+                if !keyboardHint.isEmpty {
+                    Text(keyboardHint)
+                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 4)
+                        .background(Color.primary.opacity(0.06))
+                        .clipShape(Capsule())
+                        .foregroundColor(.secondary)
+                }
+            }
 
-            // Copy indicator
-            if isHovered {
-                Image(systemName: "arrow.right")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundColor(iconColor)
-                    .transition(.scale.combined(with: .opacity))
+            HStack(spacing: 8) {
+                Label(contentLabel, systemImage: "tag")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+
+                Label(item.timestamp.formatted(date: .omitted, time: .shortened), systemImage: "clock")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+
+                if item.isPinned {
+                    Label("Pinned", systemImage: "pin.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
             }
         }
-        .padding(.horizontal, 5)
-        .padding(.vertical, 3)
-        .background(
-            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                .fill(isHovered ? Color(.controlBackgroundColor).opacity(0.7) : Color(.controlBackgroundColor).opacity(0.3))
-        )
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tileBackground)
         .overlay(
-            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                .strokeBorder(
-                    isHovered ? iconColor.opacity(0.4) : Color.clear,
-                    lineWidth: isHovered ? 1 : 0
-                )
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(accentColor.opacity(isHovered ? 0.35 : 0.2), lineWidth: isHovered ? 1.5 : 1)
         )
-        .animation(.spring(response: 0.15, dampingFraction: 0.8), value: isHovered)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .shadow(color: Color.black.opacity(isHovered ? 0.18 : 0.08), radius: isHovered ? 12 : 8, x: 0, y: 4)
+        .scaleEffect(isHovered ? 1.02 : 1)
+        .animation(.spring(response: 0.22, dampingFraction: 0.85), value: isHovered)
         .onHover { hovering in
             onHover(hovering)
         }
         .onTapGesture {
             onSelect()
         }
-        .contentShape(Rectangle())
+        .contentShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var contentLabel: String {
+        switch item.contentType {
+        case .text: return "Text"
+        case .image: return item.filename ?? "Image"
+        case .url: return "Link"
+        case .file: return item.filename ?? "File"
+        }
+    }
+
+    private var tileBackground: some View {
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(Color(.controlBackgroundColor).opacity(isHovered ? 0.9 : 0.78))
     }
 }

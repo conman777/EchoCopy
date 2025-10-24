@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 /// Application-wide constants
 enum Constants {
@@ -13,9 +14,9 @@ enum Constants {
 
     /// Popup window dimensions
     enum PopupWindow {
-        static let width: CGFloat = 240
-        static let height: CGFloat = 190
-        static let cornerRadius: CGFloat = 6
+        static let width: CGFloat = 420
+        static let height: CGFloat = 360
+        static let cornerRadius: CGFloat = 14
     }
 
     /// Accessibility
