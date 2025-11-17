@@ -37,11 +37,14 @@ struct ClipboardItem: Codable, Identifiable {
 @MainActor
 class ClipboardHistory: ObservableObject {
     @Published var items: [ClipboardItem] = []
+    @Published var excludedApps: Set<String> = []
     private let maxItems = 500
     private let storageKey = "clipboardHistory"
+    private let excludedAppsKey = "excludedApps"
 
     init() {
         loadHistory()
+        loadExcludedApps()
     }
 
     func addItem(_ content: String, contentType: ContentType = .text, filename: String? = nil, rtfContent: String? = nil) {
@@ -97,6 +100,49 @@ class ClipboardHistory: ObservableObject {
             items = decoded
         }
     }
+
+    private func loadExcludedApps() {
+        if let saved = UserDefaults.standard.array(forKey: excludedAppsKey) as? [String] {
+            excludedApps = Set(saved)
+        } else {
+            // Default exclusions for common password managers and sensitive apps
+            excludedApps = Set([
+                "com.1password.1password",           // 1Password
+                "com.agilebits.onepassword7",        // 1Password 7
+                "com.lastpass.LastPass",             // LastPass
+                "com.bitwarden.desktop",             // Bitwarden
+                "com.dashlane.Dashlane",             // Dashlane
+                "com.keeper.KeeperPasswordManager",  // Keeper
+                "com.nordpass.NordPass"              // NordPass
+            ])
+            saveExcludedApps()
+        }
+    }
+
+    private func saveExcludedApps() {
+        UserDefaults.standard.set(Array(excludedApps), forKey: excludedAppsKey)
+    }
+
+    func addExcludedApp(_ bundleID: String) {
+        // Validate bundle ID format and prevent adding this app
+        guard !bundleID.isEmpty,
+              bundleID.contains("."),
+              bundleID != Bundle.main.bundleIdentifier else {
+            return
+        }
+        excludedApps.insert(bundleID)
+        saveExcludedApps()
+    }
+
+    func removeExcludedApp(_ bundleID: String) {
+        excludedApps.remove(bundleID)
+        saveExcludedApps()
+    }
+
+    func isAppExcluded(_ bundleID: String?) -> Bool {
+        guard let bundleID = bundleID else { return false }
+        return excludedApps.contains(bundleID)
+    }
 }
 
 // MARK: - Clipboard Monitoring
@@ -135,20 +181,28 @@ class ClipboardMonitor {
         if currentChangeCount != lastChangeCount {
             lastChangeCount = currentChangeCount
 
-            let pasteboard = NSPasteboard.general
-
-            // Check for URL
-            if let urls = pasteboard.readObjects(forClasses: [NSURL.self]) as? [NSURL], let url = urls.first {
-                history.addItem(url.absoluteString ?? "", contentType: .url)
+            // Check if the source app is excluded
+            let frontmostApp = NSWorkspace.shared.frontmostApplication
+            let bundleID = frontmostApp?.bundleIdentifier
+            if history.isAppExcluded(bundleID) {
+                // Don't save clipboard content from excluded apps
                 return
             }
 
-            // Check for image
+            let pasteboard = NSPasteboard.general
+
+            // Check for image FIRST (images often come with URLs, so check images before URLs)
             if let image = pasteboard.readObjects(forClasses: [NSImage.self]) as? [NSImage], let nsImage = image.first {
                 if let tiffData = nsImage.tiffRepresentation {
                     let base64 = tiffData.base64EncodedString()
                     history.addItem(base64, contentType: .image, filename: "image.png")
                 }
+                return
+            }
+
+            // Check for URL
+            if let urls = pasteboard.readObjects(forClasses: [NSURL.self]) as? [NSURL], let url = urls.first {
+                history.addItem(url.absoluteString ?? "", contentType: .url)
                 return
             }
 
@@ -266,7 +320,7 @@ class PopupWindowManager {
 // MARK: - Popup View
 
 struct PopupView: View {
-    let history: ClipboardHistory
+    @ObservedObject var history: ClipboardHistory
     let onDismiss: () -> Void
     @State private var hoveredItemId: UUID?
 
@@ -504,6 +558,10 @@ class MenuBarManager {
             openItem.target = strongSelf
             menu.addItem(openItem)
 
+            let settingsItem = NSMenuItem(title: "Settings...", action: #selector(MenuBarManager.openSettings), keyEquivalent: ",")
+            settingsItem.target = strongSelf
+            menu.addItem(settingsItem)
+
             menu.addItem(NSMenuItem.separator())
             menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
 
@@ -519,9 +577,27 @@ class MenuBarManager {
         appDelegate?.showMainWindow()
     }
 
+    @objc private func openSettings() {
+        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+    }
+
     @objc private func pasteItem(_ sender: NSMenuItem) {
-        if let item = sender.representedObject as? ClipboardItem {
-            NSPasteboard.general.clearContents()
+        guard let item = sender.representedObject as? ClipboardItem else { return }
+
+        NSPasteboard.general.clearContents()
+
+        switch item.contentType {
+        case .text, .url:
+            NSPasteboard.general.setString(item.content, forType: .string)
+            if let rtfBase64 = item.rtfContent, let rtfData = Data(base64Encoded: rtfBase64) {
+                NSPasteboard.general.setData(rtfData, forType: .rtf)
+            }
+        case .image:
+            if let data = Data(base64Encoded: item.content),
+               let image = NSImage(data: data) {
+                NSPasteboard.general.writeObjects([image])
+            }
+        case .file:
             NSPasteboard.general.setString(item.content, forType: .string)
         }
     }
@@ -562,7 +638,9 @@ class GlobalShortcutHandler {
 
         // Check for Option+V to show popup
         if optionPressed, event.charactersIgnoringModifiers == "v" {
-            appDelegate?.showPopupWindow()
+            Task { @MainActor in
+                self.appDelegate?.showPopupWindow()
+            }
             return
         }
 
@@ -990,7 +1068,9 @@ struct ClipboardItemRow: View {
         case .text:
             return item.content.count > 100 ? String(item.content.prefix(100)) + "..." : item.content
         case .image:
-            return "[Image]"
+            // Count how many images come before this one in history
+            let imagesBefore = history.items.prefix(while: { $0.id != item.id }).filter { $0.contentType == .image }.count
+            return "Image \(imagesBefore + 1)"
         case .url:
             return item.content
         case .file:
@@ -1014,15 +1094,29 @@ struct ClipboardItemRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
-                // Icon
-                ZStack {
-                    Circle()
-                        .fill(iconColor.opacity(0.1))
-                    Image(systemName: contentIcon)
-                        .foregroundColor(iconColor)
-                        .font(.system(size: 12, weight: .semibold))
+                // Icon or Image Thumbnail
+                if item.contentType == .image, let data = Data(base64Encoded: item.content), let nsImage = NSImage(data: data) {
+                    // Show actual image thumbnail
+                    Image(nsImage: nsImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 36, height: 36)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(iconColor.opacity(0.3), lineWidth: 1)
+                        )
+                } else {
+                    // Show icon for other types
+                    ZStack {
+                        Circle()
+                            .fill(iconColor.opacity(0.1))
+                        Image(systemName: contentIcon)
+                            .foregroundColor(iconColor)
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .frame(width: 36, height: 36)
                 }
-                .frame(width: 36, height: 36)
 
                 // Content
                 VStack(alignment: .leading, spacing: 6) {
@@ -1122,6 +1216,129 @@ struct ClipboardItemRow: View {
     }
 }
 
+// MARK: - Settings View
+
+struct SettingsView: View {
+    @EnvironmentObject var history: ClipboardHistory
+    @State private var newAppBundleID = ""
+    @State private var showInvalidWarning = false
+
+    var isValidBundleID: Bool {
+        return !newAppBundleID.isEmpty &&
+               newAppBundleID.contains(".") &&
+               newAppBundleID != Bundle.main.bundleIdentifier
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("App Exclusions")
+                .font(.system(size: 20, weight: .bold))
+
+            Text("Clipboard content from these apps will not be saved to history")
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+
+            // List of excluded apps
+            ScrollView {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(history.excludedApps).sorted(), id: \.self) { bundleID in
+                        HStack {
+                            Image(systemName: "shield.fill")
+                                .foregroundColor(.blue)
+                                .font(.system(size: 12))
+
+                            Text(appName(from: bundleID))
+                                .font(.system(size: 13))
+
+                            Spacer()
+
+                            Button(action: {
+                                history.removeExcludedApp(bundleID)
+                            }) {
+                                Image(systemName: "minus.circle.fill")
+                                    .foregroundColor(.red)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Remove from exclusion list")
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+                .padding(8)
+            }
+            .frame(height: 200)
+            .background(Color(.controlBackgroundColor).opacity(0.5))
+            .cornerRadius(8)
+
+            // Add new app
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Add App to Exclude")
+                    .font(.system(size: 14, weight: .semibold))
+
+                HStack {
+                    TextField("Bundle ID (e.g., com.apple.Safari)", text: $newAppBundleID)
+                        .textFieldStyle(.roundedBorder)
+
+                    Button("Add") {
+                        if isValidBundleID {
+                            history.addExcludedApp(newAppBundleID)
+                            newAppBundleID = ""
+                            showInvalidWarning = false
+                        } else {
+                            showInvalidWarning = true
+                        }
+                    }
+                    .disabled(newAppBundleID.isEmpty)
+                }
+
+                if showInvalidWarning && !isValidBundleID && !newAppBundleID.isEmpty {
+                    Text("Invalid bundle ID format. Must contain '.' (e.g., com.company.app)")
+                        .font(.system(size: 11))
+                        .foregroundColor(.red)
+                }
+
+                Text("Tip: Copy from the currently active app")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+
+                if let currentApp = NSWorkspace.shared.frontmostApplication,
+                   let bundleID = currentApp.bundleIdentifier,
+                   bundleID != Bundle.main.bundleIdentifier,
+                   !history.excludedApps.contains(bundleID) {
+                    Button("Add Current App: \(currentApp.localizedName ?? bundleID)") {
+                        history.addExcludedApp(bundleID)
+                    }
+                    .font(.system(size: 12))
+                } else if let currentApp = NSWorkspace.shared.frontmostApplication,
+                          currentApp.bundleIdentifier == Bundle.main.bundleIdentifier {
+                    Text("Cannot exclude ClipboardManager itself")
+                        .font(.system(size: 11))
+                        .foregroundColor(.orange)
+                }
+            }
+
+            Spacer()
+        }
+        .padding(20)
+        .frame(width: 500, height: 450)
+    }
+
+    private func appName(from bundleID: String) -> String {
+        // Try to get friendly name for known apps
+        let knownApps: [String: String] = [
+            "com.1password.1password": "1Password",
+            "com.agilebits.onepassword7": "1Password 7",
+            "com.lastpass.LastPass": "LastPass",
+            "com.bitwarden.desktop": "Bitwarden",
+            "com.dashlane.Dashlane": "Dashlane",
+            "com.keeper.KeeperPasswordManager": "Keeper",
+            "com.nordpass.NordPass": "NordPass"
+        ]
+
+        return knownApps[bundleID] ?? bundleID
+    }
+}
+
 // MARK: - App
 
 @main
@@ -1142,6 +1359,11 @@ struct ClipboardManagerApp: App {
                 }
         }
         .windowStyle(.hiddenTitleBar)
+
+        Settings {
+            SettingsView()
+                .environmentObject(history)
+        }
     }
 
     init() {
