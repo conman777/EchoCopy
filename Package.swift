@@ -15,9 +15,6 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "ClipboardManager",
-            resources: [
-                .process("Info.plist")
-            ],
             swiftSettings: [
                 .unsafeFlags(["-suppress-warnings"], .when(configuration: .debug)),
             ]

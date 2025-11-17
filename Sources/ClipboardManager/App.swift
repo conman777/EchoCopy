@@ -34,6 +34,7 @@ struct ClipboardItem: Codable, Identifiable {
     }
 }
 
+@MainActor
 class ClipboardHistory: ObservableObject {
     @Published var items: [ClipboardItem] = []
     private let maxItems = 500
@@ -59,13 +60,21 @@ class ClipboardHistory: ObservableObject {
     }
 
     func removeItem(at index: Int) {
+        guard index >= 0 && index < items.count else { return }
         items.remove(at: index)
         saveHistory()
     }
 
     func togglePin(for item: ClipboardItem) {
         if let index = items.firstIndex(where: { $0.id == item.id }) {
-            let toggled = ClipboardItem(content: items[index].content, isPinned: !items[index].isPinned)
+            let current = items[index]
+            let toggled = ClipboardItem(
+                content: current.content,
+                contentType: current.contentType,
+                isPinned: !current.isPinned,
+                filename: current.filename,
+                rtfContent: current.rtfContent
+            )
             items[index] = toggled
             saveHistory()
         }
@@ -104,8 +113,13 @@ class ClipboardMonitor {
     }
 
     func start() {
-        timer = Timer.scheduledTimer(withTimeInterval: checkInterval, repeats: true) { [weak self] _ in
-            self?.checkClipboard()
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.timer = Timer.scheduledTimer(withTimeInterval: self.checkInterval, repeats: true) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.checkClipboard()
+                }
+            }
         }
     }
 
@@ -114,6 +128,7 @@ class ClipboardMonitor {
         timer = nil
     }
 
+    @MainActor
     private func checkClipboard() {
         let currentChangeCount = NSPasteboard.general.changeCount
 
@@ -131,7 +146,7 @@ class ClipboardMonitor {
             // Check for image
             if let image = pasteboard.readObjects(forClasses: [NSImage.self]) as? [NSImage], let nsImage = image.first {
                 if let tiffData = nsImage.tiffRepresentation {
-                    let base64 = tiffData.base64EncodedString().split(separator: Character("\n")).joined()
+                    let base64 = tiffData.base64EncodedString()
                     history.addItem(base64, contentType: .image, filename: "image.png")
                 }
                 return
@@ -144,7 +159,7 @@ class ClipboardMonitor {
 
                     // Try to capture RTF formatting
                     if let rtfData = pasteboard.data(forType: .rtf) {
-                        rtfBase64 = rtfData.base64EncodedString().split(separator: Character("\n")).joined()
+                        rtfBase64 = rtfData.base64EncodedString()
                     }
 
                     history.addItem(stringContent, contentType: .text, rtfContent: rtfBase64)
@@ -163,6 +178,10 @@ class PopupWindowManager {
 
     init(history: ClipboardHistory) {
         self.history = history
+    }
+
+    deinit {
+        closePopup()
     }
 
     func showPopup() {
@@ -207,6 +226,15 @@ class PopupWindowManager {
         panel.makeKey()
 
         self.popupWindow = panel
+
+        // Observe window close to ensure cleanup
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: panel,
+            queue: .main
+        ) { [weak self] _ in
+            self?.closePopup()
+        }
 
         // Monitor clicks outside the popup
         clickOutsideMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
@@ -544,10 +572,13 @@ class GlobalShortcutHandler {
         // Numbers 1-9 for quick paste
         if let character = event.charactersIgnoringModifiers?.first,
            let digit = Int(String(character)), digit >= 1, digit <= 9 {
-            pasteQuickItem(at: digit - 1)
+            Task { @MainActor in
+                pasteQuickItem(at: digit - 1)
+            }
         }
     }
 
+    @MainActor
     private func pasteQuickItem(at index: Int) {
         guard let history = history else { return }
         guard index >= 0 && index < history.items.count else { return }
@@ -618,7 +649,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var popupWindowManager: PopupWindowManager?
     var windowDelegate: MenuBarWindowDelegate?
     var localEventMonitor: Any?
+    var windowObservers: [NSObjectProtocol] = []
     weak var history: ClipboardHistory?
+    weak var clipboardMonitor: ClipboardMonitor?
     private var hasAppliedPreferredSize = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -631,11 +664,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
 
         // Setup menu bar and keyboard shortcuts
-        if let history = history {
-            menuBarManager = MenuBarManager(history: history, appDelegate: self)
-            shortcutHandler = GlobalShortcutHandler(history: history, appDelegate: self)
-            popupWindowManager = PopupWindowManager(history: history)
+        // Ensure history is set before proceeding
+        guard let history = history else {
+            print("Warning: ClipboardHistory not initialized")
+            return
         }
+
+        menuBarManager = MenuBarManager(history: history, appDelegate: self)
+        shortcutHandler = GlobalShortcutHandler(history: history, appDelegate: self)
+        popupWindowManager = PopupWindowManager(history: history)
 
         // Setup window delegate for all windows - do this after a small delay to ensure windows are ready
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
@@ -704,12 +741,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.styleMask.remove(.miniaturizable)
 
         // As a fallback, observe miniaturize attempts and immediately hide instead
-        NotificationCenter.default.addObserver(forName: NSWindow.willMiniaturizeNotification, object: window, queue: .main) { [weak self] note in
+        let observer = NotificationCenter.default.addObserver(forName: NSWindow.willMiniaturizeNotification, object: window, queue: .main) { [weak self] note in
             if let w = note.object as? NSWindow {
                 w.orderOut(nil)
                 self?.mainWindow = w
             }
         }
+        windowObservers.append(observer)
 
         // Store reference
         self.mainWindow = window
@@ -749,6 +787,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func showPopupWindow() {
         popupWindowManager?.showPopup()
+    }
+
+    deinit {
+        // Clean up event monitors
+        if let monitor = localEventMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
+
+        // Clean up notification observers
+        for observer in windowObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 }
 
@@ -1098,8 +1148,14 @@ struct ClipboardManagerApp: App {
         let historyInstance = ClipboardHistory()
         _history = StateObject(wrappedValue: historyInstance)
 
-        clipboardMonitor = ClipboardMonitor(history: historyInstance)
+        let monitor = ClipboardMonitor(history: historyInstance)
+        clipboardMonitor = monitor
+
+        // Set up app delegate references before starting monitor
         appDelegate.history = historyInstance
-        clipboardMonitor.start()
+        appDelegate.clipboardMonitor = monitor
+
+        // Start monitoring clipboard changes
+        monitor.start()
     }
 }
