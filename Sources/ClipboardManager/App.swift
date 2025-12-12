@@ -83,6 +83,40 @@ class ClipboardHistory: ObservableObject {
     init() {
         loadHistory()
         loadExcludedApps()
+        // Add demo data for screenshots if empty
+        if items.isEmpty {
+            loadDemoData()
+        }
+    }
+
+    private func loadDemoData() {
+        let demoItems: [(String, ContentType, Bool, String?)] = [
+            ("https://github.com/conman777/copynoteapple", .url, true, nil),
+            ("func calculateTotal(_ items: [Item]) -> Double {\n    return items.reduce(0) { $0 + $1.price }\n}", .text, false, nil),
+            ("Meeting notes: Discussed Q4 roadmap, need to finalize by Friday. Action items assigned to team.", .text, false, nil),
+            ("https://developer.apple.com/documentation/swiftui", .url, false, nil),
+            ("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB...", .text, false, nil),
+            ("SELECT * FROM users WHERE created_at > '2024-01-01' ORDER BY name;", .text, false, nil),
+            ("The quick brown fox jumps over the lazy dog", .text, false, nil),
+        ]
+
+        for (index, (content, type, pinned, filename)) in demoItems.enumerated() {
+            let timestamp = Date().addingTimeInterval(Double(-index * 300)) // 5 min apart
+            let item = ClipboardItem(
+                content: content,
+                contentType: type,
+                timestamp: timestamp,
+                isPinned: pinned,
+                filename: filename
+            )
+            items.append(item)
+        }
+        // Sort: pinned first, then by timestamp descending
+        items.sort { (a, b) in
+            if a.isPinned != b.isPinned { return a.isPinned }
+            return a.timestamp > b.timestamp
+        }
+        saveHistory()
     }
 
     func addItem(_ content: String, contentType: ContentType = .text, filename: String? = nil, rtfContent: String? = nil) {
