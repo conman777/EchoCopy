@@ -4,6 +4,7 @@ import Foundation
 import Combine
 import Observation
 import ApplicationServices
+import Carbon.HIToolbox
 
 // MARK: - Data Models
 
@@ -16,21 +17,58 @@ enum ContentType: String, Codable {
 
 struct ClipboardItem: Codable, Identifiable {
     let id: UUID
-    let content: String  // Plain text or base64 for images
+    let content: String  // Plain text, URL, or base64 for images
     let contentType: ContentType
     let timestamp: Date
     let isPinned: Bool
     let filename: String?  // For file/image references
     let rtfContent: String?  // Rich Text Format (base64 encoded)
 
-    init(content: String, contentType: ContentType = .text, isPinned: Bool = false, filename: String? = nil, rtfContent: String? = nil) {
-        self.id = UUID()
+    init(
+        id: UUID = UUID(),
+        content: String,
+        contentType: ContentType = .text,
+        timestamp: Date = Date(),
+        isPinned: Bool = false,
+        filename: String? = nil,
+        rtfContent: String? = nil
+    ) {
+        self.id = id
         self.content = content
         self.contentType = contentType
-        self.timestamp = Date()
+        self.timestamp = timestamp
         self.isPinned = isPinned
         self.filename = filename
         self.rtfContent = rtfContent
+    }
+
+    var searchableText: String {
+        switch contentType {
+        case .text, .url:
+            return content
+        case .image:
+            return filename ?? ""
+        case .file:
+            return filename ?? content
+        }
+    }
+
+    var menuPreview: String {
+        switch contentType {
+        case .text:
+            let firstLine = content.components(separatedBy: .newlines).first ?? ""
+            let trimmed = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? "Text" : trimmed
+        case .image:
+            return filename ?? "Image"
+        case .url:
+            if let url = URL(string: content), let host = url.host, !host.isEmpty {
+                return host
+            }
+            return content
+        case .file:
+            return filename ?? "File"
+        }
     }
 }
 
@@ -48,15 +86,29 @@ class ClipboardHistory: ObservableObject {
     }
 
     func addItem(_ content: String, contentType: ContentType = .text, filename: String? = nil, rtfContent: String? = nil) {
-        if let lastItem = items.first, lastItem.content == content {
+        // Compare against the most recent *unpinned* item (pinned items are kept at the top).
+        if let lastItem = items.first(where: { !$0.isPinned }),
+           lastItem.content == content,
+           lastItem.contentType == contentType,
+           lastItem.filename == filename,
+           lastItem.rtfContent == rtfContent {
             return
         }
 
         let newItem = ClipboardItem(content: content, contentType: contentType, filename: filename, rtfContent: rtfContent)
-        items.insert(newItem, at: 0)
+        // Keep pinned items at the top; insert new history items just below pinned.
+        let insertionIndex = items.firstIndex(where: { !$0.isPinned }) ?? items.count
+        items.insert(newItem, at: insertionIndex)
 
         if items.count > maxItems {
-            items = Array(items.prefix(maxItems))
+            // Prefer dropping the oldest unpinned items first (keep pinned if possible).
+            while items.count > maxItems {
+                if let lastUnpinnedIndex = items.lastIndex(where: { !$0.isPinned }) {
+                    items.remove(at: lastUnpinnedIndex)
+                } else {
+                    items.removeLast()
+                }
+            }
         }
 
         saveHistory()
@@ -68,24 +120,58 @@ class ClipboardHistory: ObservableObject {
         saveHistory()
     }
 
+    func removeItem(id: UUID) {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        items.remove(at: index)
+        saveHistory()
+    }
+
     func togglePin(for item: ClipboardItem) {
-        if let index = items.firstIndex(where: { $0.id == item.id }) {
-            let current = items[index]
-            let toggled = ClipboardItem(
-                content: current.content,
-                contentType: current.contentType,
-                isPinned: !current.isPinned,
-                filename: current.filename,
-                rtfContent: current.rtfContent
-            )
-            items[index] = toggled
-            saveHistory()
+        guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
+
+        let current = items.remove(at: index)
+        let updated = ClipboardItem(
+            id: current.id,
+            content: current.content,
+            contentType: current.contentType,
+            timestamp: current.timestamp,
+            isPinned: !current.isPinned,
+            filename: current.filename,
+            rtfContent: current.rtfContent
+        )
+
+        if updated.isPinned {
+            // Newly pinned items go to the very top.
+            items.insert(updated, at: 0)
+        } else {
+            // Return unpinned items to the unpinned section, keeping chronological ordering by timestamp.
+            let insertionIndex = insertionIndexForUnpinnedItem(with: updated.timestamp)
+            items.insert(updated, at: insertionIndex)
         }
+
+        saveHistory()
     }
 
     func clearHistory() {
         items.removeAll()
         saveHistory()
+    }
+
+    func clearUnpinnedHistory() {
+        items.removeAll(where: { !$0.isPinned })
+        saveHistory()
+    }
+
+    private func insertionIndexForUnpinnedItem(with timestamp: Date) -> Int {
+        let startIndex = items.firstIndex(where: { !$0.isPinned }) ?? items.count
+        guard startIndex < items.count else { return items.count }
+
+        for i in startIndex..<items.count {
+            if items[i].timestamp < timestamp {
+                return i
+            }
+        }
+        return items.count
     }
 
     private func saveHistory() {
@@ -208,7 +294,7 @@ class ClipboardMonitor {
 
             // Check for text with RTF support
             if let stringContent = pasteboard.string(forType: .string) {
-                if !stringContent.trimmingCharacters(in: .whitespaces).isEmpty {
+                if !stringContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     var rtfBase64: String? = nil
 
                     // Try to capture RTF formatting
@@ -229,6 +315,7 @@ class PopupWindowManager {
     private var popupWindow: NSWindow?
     private weak var history: ClipboardHistory?
     private var clickOutsideMonitor: Any?
+    private var windowWillCloseObserver: NSObjectProtocol?
 
     init(history: ClipboardHistory) {
         self.history = history
@@ -241,22 +328,33 @@ class PopupWindowManager {
     func showPopup() {
         guard let history = history else { return }
 
-        // Close existing popup if open
-        popupWindow?.close()
+        // Close existing popup if open (and clean up monitors/observers)
+        closePopup()
 
         // Create hosting controller with popup view
         let popupView = PopupView(history: history, onDismiss: { [weak self] in
-            self?.popupWindow?.close()
-            self?.popupWindow = nil
+            self?.closePopup()
         })
         .environmentObject(history)
 
         let hostingController = NSHostingController(rootView: popupView)
-        hostingController.view.frame = NSRect(x: 0, y: 0, width: 240, height: 190)
+        let popupSize = NSSize(width: 240, height: 190)
+        hostingController.view.frame = NSRect(origin: .zero, size: popupSize)
 
-        // Position near mouse cursor
+        // Position near mouse cursor (clamped to the current screen's visible frame)
         let mouseLocation = NSEvent.mouseLocation
-        let frame = NSRect(x: mouseLocation.x - 120, y: mouseLocation.y - 200, width: 240, height: 190)
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) ?? NSScreen.main
+        let visibleFrame = screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? NSRect(x: mouseLocation.x, y: mouseLocation.y, width: popupSize.width, height: popupSize.height)
+
+        var origin = CGPoint(
+            x: mouseLocation.x - (popupSize.width / 2),
+            y: mouseLocation.y - popupSize.height - 12
+        )
+
+        origin.x = min(max(origin.x, visibleFrame.minX + 8), visibleFrame.maxX - popupSize.width - 8)
+        origin.y = min(max(origin.y, visibleFrame.minY + 8), visibleFrame.maxY - popupSize.height - 8)
+
+        let frame = NSRect(origin: origin, size: popupSize)
 
         // Create panel (better for popups than regular window)
         let panel = NSPanel(
@@ -282,7 +380,7 @@ class PopupWindowManager {
         self.popupWindow = panel
 
         // Observe window close to ensure cleanup
-        NotificationCenter.default.addObserver(
+        windowWillCloseObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification,
             object: panel,
             queue: .main
@@ -312,8 +410,15 @@ class PopupWindowManager {
             clickOutsideMonitor = nil
         }
 
-        popupWindow?.close()
+        // Remove window observer
+        if let observer = windowWillCloseObserver {
+            NotificationCenter.default.removeObserver(observer)
+            windowWillCloseObserver = nil
+        }
+
+        let windowToClose = popupWindow
         popupWindow = nil
+        windowToClose?.close()
     }
 }
 
@@ -378,21 +483,7 @@ struct PopupView: View {
     }
 
     private func copyItem(_ item: ClipboardItem) {
-        NSPasteboard.general.clearContents()
-        switch item.contentType {
-        case .text, .url:
-            NSPasteboard.general.setString(item.content, forType: .string)
-            if let rtfBase64 = item.rtfContent, let rtfData = Data(base64Encoded: rtfBase64) {
-                NSPasteboard.general.setData(rtfData, forType: .rtf)
-            }
-        case .image:
-            if let data = Data(base64Encoded: item.content),
-               let image = NSImage(data: data) {
-                NSPasteboard.general.writeObjects([image])
-            }
-        case .file:
-            NSPasteboard.general.setString(item.content, forType: .string)
-        }
+        PasteboardWriter.write(item)
     }
 }
 
@@ -500,15 +591,17 @@ struct PopupItemRow: View {
 
 // MARK: - Menu Bar Manager
 
-class MenuBarManager {
+class MenuBarManager: NSObject, NSMenuDelegate {
     private var statusItem: NSStatusItem?
     private weak var history: ClipboardHistory?
     private weak var appDelegate: AppDelegate?
     private var historySubscription: AnyCancellable?
+    private var statusMenu: NSMenu?
 
     init(history: ClipboardHistory, appDelegate: AppDelegate) {
         self.history = history
         self.appDelegate = appDelegate
+        super.init()
         setupMenuBar()
         setupHistoryObserver()
     }
@@ -519,7 +612,8 @@ class MenuBarManager {
         if let button = statusItem?.button {
             button.image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "ClipboardManager")
             button.target = self
-            button.action = #selector(toggleWindow)
+            button.action = #selector(statusItemClicked)
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
 
         updateMenu()
@@ -540,10 +634,20 @@ class MenuBarManager {
             guard let strongSelf = self else { return }
 
             // Show top 10 items
-            let topItems = Array(history.items.prefix(10))
+            let pinned = history.items.filter { $0.isPinned }
+            let unpinned = history.items.filter { !$0.isPinned }
+            let topItems = Array((pinned + unpinned).prefix(10))
             for (index, item) in topItems.enumerated() {
-                let preview = String(item.content.prefix(40))
-                let title = "\(index + 1). \(preview)..."
+                var preview = item.menuPreview
+                preview = preview.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
+                preview = preview.trimmingCharacters(in: .whitespacesAndNewlines)
+                if preview.isEmpty { preview = "Item" }
+
+                let clipped = preview.count > 40
+                    ? String(preview.prefix(40)).trimmingCharacters(in: .whitespacesAndNewlines) + "…"
+                    : preview
+
+                let title = "\(index + 1). \(clipped)"
                 let menuItem = NSMenuItem(title: title, action: #selector(MenuBarManager.pasteItem(_:)), keyEquivalent: "")
                 menuItem.representedObject = item
                 menuItem.target = strongSelf
@@ -565,12 +669,37 @@ class MenuBarManager {
             menu.addItem(NSMenuItem.separator())
             menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
 
-            self?.statusItem?.menu = menu
+            menu.delegate = strongSelf
+            self?.statusMenu = menu
+            // Keep the status item menu nil so left-click runs our action.
+            self?.statusItem?.menu = nil
         }
     }
 
-    @objc private func toggleWindow() {
-        appDelegate?.toggleMainWindow()
+    @objc private func statusItemClicked() {
+        guard let event = NSApp.currentEvent else {
+            appDelegate?.toggleMainWindow()
+            return
+        }
+
+        let isRightClick = (event.type == .rightMouseUp) || event.modifierFlags.contains(.control)
+        if isRightClick {
+            guard let statusItem else { return }
+            guard let menu = statusMenu else { return }
+
+            // Temporarily attach the menu so it displays in the correct position.
+            statusItem.menu = menu
+            DispatchQueue.main.async { [weak self] in
+                self?.statusItem?.button?.performClick(nil)
+            }
+        } else {
+            appDelegate?.toggleMainWindow()
+        }
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        // Restore left-click behavior after the menu closes.
+        statusItem?.menu = nil
     }
 
     @objc private func openWindow() {
@@ -583,23 +712,7 @@ class MenuBarManager {
 
     @objc private func pasteItem(_ sender: NSMenuItem) {
         guard let item = sender.representedObject as? ClipboardItem else { return }
-
-        NSPasteboard.general.clearContents()
-
-        switch item.contentType {
-        case .text, .url:
-            NSPasteboard.general.setString(item.content, forType: .string)
-            if let rtfBase64 = item.rtfContent, let rtfData = Data(base64Encoded: rtfBase64) {
-                NSPasteboard.general.setData(rtfData, forType: .rtf)
-            }
-        case .image:
-            if let data = Data(base64Encoded: item.content),
-               let image = NSImage(data: data) {
-                NSPasteboard.general.writeObjects([image])
-            }
-        case .file:
-            NSPasteboard.general.setString(item.content, forType: .string)
-        }
+        PasteboardWriter.write(item)
     }
 }
 
@@ -607,6 +720,8 @@ class MenuBarManager {
 
 class GlobalShortcutHandler {
     private var eventMonitor: Any?
+    private var eventTap: CFMachPort?
+    private var eventTapSource: CFRunLoopSource?
     weak var history: ClipboardHistory?
     weak var appDelegate: AppDelegate?
 
@@ -626,15 +741,119 @@ class GlobalShortcutHandler {
             _ = AXIsProcessTrustedWithOptions(options as CFDictionary)
         }
 
-        eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            self?.handleGlobalKeyEvent(event)
+        installEventTap()
+    }
+
+    private func installEventTap() {
+        guard eventTap == nil else { return }
+
+        let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
+
+        let callback: CGEventTapCallBack = { proxy, type, event, refcon in
+            guard let refcon else {
+                return Unmanaged.passUnretained(event)
+            }
+
+            let handler = Unmanaged<GlobalShortcutHandler>
+                .fromOpaque(refcon)
+                .takeUnretainedValue()
+
+            return handler.handleEventTap(proxy: proxy, type: type, event: event)
+        }
+
+        let userInfo = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: mask,
+            callback: callback,
+            userInfo: userInfo
+        ) else {
+            // Fallback: global monitor (cannot prevent the key from also reaching the focused app).
+            eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                self?.handleFallbackGlobalKeyEvent(event)
+            }
+            return
+        }
+
+        eventTap = tap
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        eventTapSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+    }
+
+    private func handleEventTap(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        // If the system disables the tap, re-enable it.
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let eventTap {
+                CGEvent.tapEnable(tap: eventTap, enable: true)
+            }
+            return Unmanaged.passUnretained(event)
+        }
+
+        guard type == .keyDown else {
+            return Unmanaged.passUnretained(event)
+        }
+
+        let flags = event.flags
+        let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
+
+        let optionPressed = flags.contains(.maskAlternate)
+        let cmdPressed = flags.contains(.maskCommand)
+        let shiftPressed = flags.contains(.maskShift)
+        let ctrlPressed = flags.contains(.maskControl)
+
+        // Option+V => show popup and swallow so it doesn't type into the focused app.
+        if optionPressed,
+           !cmdPressed,
+           !shiftPressed,
+           !ctrlPressed,
+           keyCode == CGKeyCode(kVK_ANSI_V) {
+            Task { @MainActor [weak self] in
+                self?.appDelegate?.showPopupWindow()
+            }
+            return nil
+        }
+
+        // Cmd+Option+1..9 => quick paste (we do NOT swallow, to preserve app shortcuts).
+        if cmdPressed,
+           optionPressed,
+           !shiftPressed,
+           !ctrlPressed,
+           let digit = digitForKeyCode(keyCode),
+           digit >= 1,
+           digit <= 9 {
+            Task { @MainActor [weak self] in
+                self?.pasteQuickItem(at: digit - 1)
+            }
+            return Unmanaged.passUnretained(event)
+        }
+
+        return Unmanaged.passUnretained(event)
+    }
+
+    private func digitForKeyCode(_ keyCode: CGKeyCode) -> Int? {
+        switch Int(keyCode) {
+        case kVK_ANSI_1: return 1
+        case kVK_ANSI_2: return 2
+        case kVK_ANSI_3: return 3
+        case kVK_ANSI_4: return 4
+        case kVK_ANSI_5: return 5
+        case kVK_ANSI_6: return 6
+        case kVK_ANSI_7: return 7
+        case kVK_ANSI_8: return 8
+        case kVK_ANSI_9: return 9
+        default: return nil
         }
     }
 
-    private func handleGlobalKeyEvent(_ event: NSEvent) {
+    private func handleFallbackGlobalKeyEvent(_ event: NSEvent) {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let optionPressed = modifiers == .option
-        let cmdAltPressed = modifiers.contains([.command, .option])
+        let normalized = modifiers.subtracting([.capsLock, .numericPad, .function])
+        let optionPressed = normalized == .option
+        let cmdAltPressed = normalized == [.command, .option]
 
         // Check for Option+V to show popup
         if optionPressed, event.charactersIgnoringModifiers == "v" {
@@ -662,24 +881,20 @@ class GlobalShortcutHandler {
         guard index >= 0 && index < history.items.count else { return }
 
         let item = history.items[index]
-
-        NSPasteboard.general.clearContents()
-        switch item.contentType {
-        case .text, .url:
-            NSPasteboard.general.setString(item.content, forType: .string)
-        case .image:
-            if let data = Data(base64Encoded: item.content),
-               let image = NSImage(data: data) {
-                NSPasteboard.general.writeObjects([image])
-            }
-        case .file:
-            NSPasteboard.general.setString(item.content, forType: .string)
-        }
+        PasteboardWriter.write(item)
     }
 
     deinit {
         if let monitor = eventMonitor {
             NSEvent.removeMonitor(monitor)
+        }
+
+        if let source = eventTapSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+        }
+
+        if let tap = eventTap {
+            CFMachPortInvalidate(tap)
         }
     }
 }
@@ -707,12 +922,6 @@ class MenuBarWindowDelegate: NSObject, NSWindowDelegate {
         return false
     }
 
-    func windowShouldMiniaturize(_ sender: NSWindow) -> Bool {
-        // Prevent minimize to dock, hide to menu bar instead
-        sender.orderOut(nil)
-        return false  // Don't allow the miniaturize
-    }
-
     func window(_ window: NSWindow, willUseFullScreenPresentationOptions options: NSApplication.PresentationOptions = []) -> NSApplication.PresentationOptions {
         return options
     }
@@ -727,7 +936,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var popupWindowManager: PopupWindowManager?
     var windowDelegate: MenuBarWindowDelegate?
     var localEventMonitor: Any?
-    var windowObservers: [NSObjectProtocol] = []
+    var windowMiniaturizeObservers: [ObjectIdentifier: NSObjectProtocol] = [:]
     weak var history: ClipboardHistory?
     weak var clipboardMonitor: ClipboardMonitor?
     private var hasAppliedPreferredSize = false
@@ -763,10 +972,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setupWindowBehavior() {
-        for window in NSApp.windows {
-            configureWindow(window)
-        }
-
         // Add local event monitor to intercept Cmd+M as a backup
         if localEventMonitor == nil {
             localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
@@ -819,13 +1024,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.styleMask.remove(.miniaturizable)
 
         // As a fallback, observe miniaturize attempts and immediately hide instead
-        let observer = NotificationCenter.default.addObserver(forName: NSWindow.willMiniaturizeNotification, object: window, queue: .main) { [weak self] note in
-            if let w = note.object as? NSWindow {
-                w.orderOut(nil)
-                self?.mainWindow = w
+        let windowID = ObjectIdentifier(window)
+        if windowMiniaturizeObservers[windowID] == nil {
+            let observer = NotificationCenter.default.addObserver(forName: NSWindow.willMiniaturizeNotification, object: window, queue: .main) { [weak self] note in
+                if let w = note.object as? NSWindow {
+                    w.orderOut(nil)
+                    self?.mainWindow = w
+                }
             }
+            windowMiniaturizeObservers[windowID] = observer
         }
-        windowObservers.append(observer)
 
         // Store reference
         self.mainWindow = window
@@ -854,7 +1062,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func showMainWindow() {
-        // Find the main window from the app's windows
+        if let window = mainWindow {
+            configureWindow(window)
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        // Fallback: find the first non-panel window.
         if let window = NSApp.windows.first(where: { !$0.isKind(of: NSPanel.self) }) {
             configureWindow(window)
             window.makeKeyAndOrderFront(nil)
@@ -874,7 +1089,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Clean up notification observers
-        for observer in windowObservers {
+        for (_, observer) in windowMiniaturizeObservers {
             NotificationCenter.default.removeObserver(observer)
         }
     }
@@ -887,10 +1102,17 @@ struct ContentView: View {
     @State private var searchText = ""
 
     var filteredItems: [ClipboardItem] {
-        if searchText.isEmpty {
-            return history.items
-        }
-        return history.items.filter { $0.content.localizedCaseInsensitiveContains(searchText) }
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return history.items }
+        return history.items.filter { $0.searchableText.localizedCaseInsensitiveContains(query) }
+    }
+
+    var pinnedItems: [ClipboardItem] {
+        filteredItems.filter(\.isPinned)
+    }
+
+    var unpinnedItems: [ClipboardItem] {
+        filteredItems.filter { !$0.isPinned }
     }
 
     var body: some View {
@@ -916,6 +1138,16 @@ struct ContentView: View {
                             .foregroundColor(.secondary)
                         TextField("Search...", text: $searchText)
                             .textFieldStyle(.plain)
+                        if !searchText.isEmpty {
+                            Button {
+                                searchText = ""
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Clear search")
+                        }
                     }
                     .padding(.vertical, 6)
                     .padding(.horizontal, 10)
@@ -931,7 +1163,7 @@ struct ContentView: View {
                 .padding(12)
 
                 // Content
-                if filteredItems.isEmpty {
+                if history.items.isEmpty {
                     VStack(spacing: 14) {
                         Image(systemName: "doc.text.magnifyingglass")
                             .font(.system(size: 42))
@@ -945,15 +1177,45 @@ struct ContentView: View {
                             .font(.system(size: 14))
                             .foregroundColor(.secondary)
 
-                        Text("Use Command+Shift+K to clear history quickly.")
+                        Text("Use Option+V for the quick paste popup.")
                             .font(.system(size: 12))
                             .foregroundColor(Color.secondary.opacity(0.8))
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if filteredItems.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 36))
+                            .foregroundColor(.secondary)
+
+                        Text("No results")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(.primary)
+
+                        Text("Try a different search.")
+                            .font(.system(size: 13))
+                            .foregroundColor(.secondary)
+
+                        Button("Clear search") {
+                            searchText = ""
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     ScrollView {
-                        VStack(spacing: 6) {
-                            ForEach(filteredItems) { item in
+                        LazyVStack(spacing: 6) {
+                            if !pinnedItems.isEmpty {
+                                SectionHeader(title: "Pinned")
+                                ForEach(pinnedItems) { item in
+                                    ClipboardItemRow(item: item, history: history)
+                                }
+                                if !unpinnedItems.isEmpty {
+                                    SectionHeader(title: "History")
+                                }
+                            }
+
+                            ForEach(unpinnedItems) { item in
                                 ClipboardItemRow(item: item, history: history)
                             }
                         }
@@ -972,6 +1234,13 @@ struct ContentView: View {
                     .buttonStyle(.bordered)
                     .tint(.red)
                     .keyboardShortcut("k", modifiers: [.command, .shift])
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            history.clearUnpinnedHistory()
+                        } label: {
+                            Label("Clear History (Keep Pinned)", systemImage: "trash")
+                        }
+                    }
 
                     Spacer()
 
@@ -1001,6 +1270,42 @@ extension View {
         self.overlay(alignment: .top) {
             Divider()
         }
+    }
+}
+
+enum PasteboardWriter {
+    static func write(_ item: ClipboardItem, to pasteboard: NSPasteboard = .general) {
+        pasteboard.clearContents()
+
+        switch item.contentType {
+        case .text, .url:
+            pasteboard.setString(item.content, forType: .string)
+            if let rtfBase64 = item.rtfContent,
+               let rtfData = Data(base64Encoded: rtfBase64) {
+                pasteboard.setData(rtfData, forType: .rtf)
+            }
+        case .image:
+            if let data = Data(base64Encoded: item.content),
+               let image = NSImage(data: data) {
+                pasteboard.writeObjects([image])
+            }
+        case .file:
+            pasteboard.setString(item.content, forType: .string)
+        }
+    }
+}
+
+struct SectionHeader: View {
+    let title: String
+
+    var body: some View {
+        Text(title.uppercased())
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundColor(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 4)
+            .padding(.top, 6)
+            .padding(.bottom, 2)
     }
 }
 
@@ -1068,9 +1373,7 @@ struct ClipboardItemRow: View {
         case .text:
             return item.content.count > 100 ? String(item.content.prefix(100)) + "..." : item.content
         case .image:
-            // Count how many images come before this one in history
-            let imagesBefore = history.items.prefix(while: { $0.id != item.id }).filter { $0.contentType == .image }.count
-            return "Image \(imagesBefore + 1)"
+            return item.filename ?? "Image"
         case .url:
             return item.content
         case .file:
@@ -1192,27 +1495,31 @@ struct ClipboardItemRow: View {
             isHovered = hovering
         }
         .contentShape(Rectangle())
+        .contextMenu {
+            Button {
+                pasteItem()
+            } label: {
+                Label("Copy to Clipboard", systemImage: "doc.on.doc")
+            }
+
+            Button {
+                history.togglePin(for: item)
+            } label: {
+                Label(item.isPinned ? "Unpin" : "Pin", systemImage: item.isPinned ? "pin.slash" : "pin")
+            }
+
+            Divider()
+
+            Button(role: .destructive) {
+                history.removeItem(id: item.id)
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
     }
 
     private func pasteItem() {
-        NSPasteboard.general.clearContents()
-
-        switch item.contentType {
-        case .text, .url:
-            NSPasteboard.general.setString(item.content, forType: .string)
-
-            // Restore RTF formatting if available
-            if let rtfBase64 = item.rtfContent, let rtfData = Data(base64Encoded: rtfBase64) {
-                NSPasteboard.general.setData(rtfData, forType: .rtf)
-            }
-        case .image:
-            if let data = Data(base64Encoded: item.content),
-               let image = NSImage(data: data) {
-                NSPasteboard.general.writeObjects([image])
-            }
-        case .file:
-            NSPasteboard.general.setString(item.content, forType: .string)
-        }
+        PasteboardWriter.write(item)
     }
 }
 
@@ -1220,8 +1527,10 @@ struct ClipboardItemRow: View {
 
 struct SettingsView: View {
     @EnvironmentObject var history: ClipboardHistory
+    @StateObject private var updateChecker = UpdateChecker()
     @State private var newAppBundleID = ""
     @State private var showInvalidWarning = false
+    @State private var selectedTab = 0
 
     var isValidBundleID: Bool {
         return !newAppBundleID.isEmpty &&
@@ -1229,10 +1538,109 @@ struct SettingsView: View {
                newAppBundleID != Bundle.main.bundleIdentifier
     }
 
+    private var currentVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("App Exclusions")
-                .font(.system(size: 20, weight: .bold))
+        TabView(selection: $selectedTab) {
+            // Updates Tab
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Updates")
+                    .font(.system(size: 20, weight: .bold))
+
+                // Current version info
+                HStack {
+                    Text("Current Version:")
+                        .foregroundColor(.secondary)
+                    Text(currentVersion)
+                        .fontWeight(.medium)
+                }
+
+                // Update status
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if updateChecker.isChecking {
+                            HStack {
+                                ProgressView()
+                                    .scaleEffect(0.7)
+                                Text("Checking for updates...")
+                                    .foregroundColor(.secondary)
+                            }
+                        } else if let error = updateChecker.errorMessage {
+                            HStack {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundColor(.orange)
+                                Text(error)
+                                    .foregroundColor(.secondary)
+                            }
+                        } else if updateChecker.updateAvailable, let latestVersion = updateChecker.latestVersion {
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Image(systemName: "arrow.down.circle.fill")
+                                        .foregroundColor(.green)
+                                        .font(.system(size: 20))
+                                    VStack(alignment: .leading) {
+                                        Text("Update Available!")
+                                            .fontWeight(.semibold)
+                                        Text("Version \(latestVersion) is available")
+                                            .font(.system(size: 12))
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+
+                                Button("Download Update") {
+                                    updateChecker.openDownloadPage()
+                                }
+                                .buttonStyle(.borderedProminent)
+                            }
+                        } else if updateChecker.latestVersion != nil {
+                            HStack {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(.green)
+                                Text("You're up to date!")
+                            }
+                        } else {
+                            HStack {
+                                Image(systemName: "info.circle")
+                                    .foregroundColor(.secondary)
+                                Text("Click below to check for updates")
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+
+                        Divider()
+
+                        HStack {
+                            Button("Check for Updates") {
+                                updateChecker.checkForUpdates()
+                            }
+                            .disabled(updateChecker.isChecking)
+
+                            Spacer()
+
+                            if let lastCheck = updateChecker.lastCheckDate {
+                                Text("Last checked: \(lastCheck.formatted(date: .omitted, time: .shortened))")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    .padding(8)
+                }
+
+                Spacer()
+            }
+            .padding(20)
+            .tabItem {
+                Label("Updates", systemImage: "arrow.triangle.2.circlepath")
+            }
+            .tag(0)
+
+            // App Exclusions Tab
+            VStack(alignment: .leading, spacing: 16) {
+                Text("App Exclusions")
+                    .font(.system(size: 20, weight: .bold))
 
             Text("Clipboard content from these apps will not be saved to history")
                 .font(.system(size: 12))
@@ -1318,8 +1726,13 @@ struct SettingsView: View {
             }
 
             Spacer()
+            }
+            .padding(20)
+            .tabItem {
+                Label("Exclusions", systemImage: "shield")
+            }
+            .tag(1)
         }
-        .padding(20)
         .frame(width: 500, height: 450)
     }
 
@@ -1339,6 +1752,110 @@ struct SettingsView: View {
     }
 }
 
+// MARK: - Update Checker
+
+class UpdateChecker: ObservableObject {
+    @Published var updateAvailable = false
+    @Published var latestVersion: String?
+    @Published var downloadURL: String?
+    @Published var isChecking = false
+    @Published var lastCheckDate: Date?
+    @Published var errorMessage: String?
+
+    // GitHub repo
+    private let githubOwner = "conman777"
+    private let githubRepo = "copynoteapple"
+
+    private var currentVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
+    }
+
+    func checkForUpdates() {
+        guard !isChecking else { return }
+
+        isChecking = true
+        errorMessage = nil
+
+        let urlString = "https://api.github.com/repos/\(githubOwner)/\(githubRepo)/releases/latest"
+        guard let url = URL(string: urlString) else {
+            DispatchQueue.main.async {
+                self.isChecking = false
+                self.errorMessage = "Invalid URL"
+            }
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.setValue("application/vnd.github.v3+json", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 10
+
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.isChecking = false
+                self.lastCheckDate = Date()
+
+                if let error = error {
+                    self.errorMessage = "Network error: \(error.localizedDescription)"
+                    return
+                }
+
+                guard let data = data else {
+                    self.errorMessage = "No data received"
+                    return
+                }
+
+                // Check for 404 (no releases yet)
+                if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 404 {
+                    self.errorMessage = "No releases found"
+                    self.updateAvailable = false
+                    return
+                }
+
+                do {
+                    if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let tagName = json["tag_name"] as? String,
+                       let htmlURL = json["html_url"] as? String {
+
+                        // Remove 'v' prefix if present (e.g., "v1.0.1" -> "1.0.1")
+                        let latestVersion = tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName
+                        self.latestVersion = latestVersion
+                        self.downloadURL = htmlURL
+
+                        // Compare versions
+                        self.updateAvailable = self.isNewerVersion(latestVersion, than: self.currentVersion)
+                        self.errorMessage = nil
+                    } else {
+                        self.errorMessage = "Could not parse release info"
+                    }
+                } catch {
+                    self.errorMessage = "Parse error: \(error.localizedDescription)"
+                }
+            }
+        }.resume()
+    }
+
+    private func isNewerVersion(_ new: String, than current: String) -> Bool {
+        let newParts = new.split(separator: ".").compactMap { Int($0) }
+        let currentParts = current.split(separator: ".").compactMap { Int($0) }
+
+        for i in 0..<max(newParts.count, currentParts.count) {
+            let newPart = i < newParts.count ? newParts[i] : 0
+            let currentPart = i < currentParts.count ? currentParts[i] : 0
+
+            if newPart > currentPart { return true }
+            if newPart < currentPart { return false }
+        }
+        return false
+    }
+
+    func openDownloadPage() {
+        if let urlString = downloadURL, let url = URL(string: urlString) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+}
+
 // MARK: - App
 
 @main
@@ -1351,12 +1868,6 @@ struct ClipboardManagerApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(history)
-                .onAppear {
-                    // Configure window when content appears
-                    if let window = NSApp.windows.first(where: { !$0.isKind(of: NSPanel.self) }) {
-                        appDelegate.applyWindowBehavior(to: window)
-                    }
-                }
         }
         .windowStyle(.hiddenTitleBar)
 
