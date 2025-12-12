@@ -8,8 +8,13 @@ A simple, fast clipboard manager for macOS built with Swift and SwiftUI.
 
 ## Screenshots
 
-<!-- Screenshots will be added here -->
-*Screenshots coming soon - run `./take-screenshots.sh` to generate them*
+<p align="center">
+  <img src="screenshots/clipboard-history.png" alt="Clipboard History" width="400">
+</p>
+
+<p align="center">
+  <img src="screenshots/settings.png" alt="Settings" width="400">
+</p>
 
 ## Features
 
