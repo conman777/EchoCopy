@@ -343,6 +343,182 @@ class ClipboardMonitor {
     }
 }
 
+// MARK: - System Monitor
+
+class SystemMonitor {
+    private var updateTimer: Timer?
+    private var cpuInfo: processor_info_array_t?
+    private var prevCpuInfo: processor_info_array_t?
+    private var numCpuInfo: mach_msg_type_number_t = 0
+    private var numPrevCpuInfo: mach_msg_type_number_t = 0
+    private var numCPUs: uint = 0
+    private let cpuUsageLock = NSLock()
+
+    var onUpdate: ((String) -> Void)?
+
+    init() {
+        let mibKeys: [Int32] = [CTL_HW, HW_NCPU]
+        var numCPUsU: uint = 0
+        var sizeOfNumCPUs = MemoryLayout<uint>.size
+        let status = mibKeys.withUnsafeBufferPointer { mib in
+            sysctl(UnsafeMutablePointer(mutating: mib.baseAddress), 2, &numCPUsU, &sizeOfNumCPUs, nil, 0)
+        }
+        if status == 0 {
+            numCPUs = numCPUsU
+        }
+    }
+
+    func start() {
+        // Update immediately
+        updateStats()
+
+        // Then update every 3 seconds
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+            self?.updateStats()
+        }
+    }
+
+    func stop() {
+        updateTimer?.invalidate()
+        updateTimer = nil
+    }
+
+    private func updateStats() {
+        let cpuUsage = getCPUUsage()
+        let memoryUsage = getMemoryUsage()
+        let diskUsage = getDiskUsage()
+
+        let tooltip = """
+        CPU: \(String(format: "%.1f", cpuUsage))%
+        Memory: \(memoryUsage.used) / \(memoryUsage.total) (\(String(format: "%.0f", memoryUsage.percentage))%)
+        Disk: \(diskUsage.used) / \(diskUsage.total) (\(String(format: "%.0f", diskUsage.percentage))%)
+        """
+
+        DispatchQueue.main.async { [weak self] in
+            self?.onUpdate?(tooltip)
+        }
+    }
+
+    private func getCPUUsage() -> Double {
+        var numCPUsU: natural_t = 0
+        var cpuInfoLocal: processor_info_array_t?
+        var numCpuInfoLocal: mach_msg_type_number_t = 0
+
+        let err = host_processor_info(mach_host_self(), PROCESSOR_CPU_LOAD_INFO, &numCPUsU, &cpuInfoLocal, &numCpuInfoLocal)
+
+        guard err == KERN_SUCCESS, let cpuInfoLocal = cpuInfoLocal else {
+            return 0.0
+        }
+
+        cpuUsageLock.lock()
+        defer { cpuUsageLock.unlock() }
+
+        var totalUsage: Double = 0
+
+        if let prevCpuInfo = prevCpuInfo {
+            for i in 0..<Int(numCPUs) {
+                var inUse: Int32
+                var total: Int32
+
+                let offset = Int32(CPU_STATE_MAX) * Int32(i)
+
+                inUse = cpuInfoLocal[Int(offset + CPU_STATE_USER)]
+                    - prevCpuInfo[Int(offset + CPU_STATE_USER)]
+                    + cpuInfoLocal[Int(offset + CPU_STATE_SYSTEM)]
+                    - prevCpuInfo[Int(offset + CPU_STATE_SYSTEM)]
+                    + cpuInfoLocal[Int(offset + CPU_STATE_NICE)]
+                    - prevCpuInfo[Int(offset + CPU_STATE_NICE)]
+
+                total = inUse
+                    + cpuInfoLocal[Int(offset + CPU_STATE_IDLE)]
+                    - prevCpuInfo[Int(offset + CPU_STATE_IDLE)]
+
+                if total > 0 {
+                    totalUsage += Double(inUse) / Double(total) * 100.0
+                }
+            }
+
+            // Deallocate previous
+            let prevSize = vm_size_t(MemoryLayout<integer_t>.stride * Int(numPrevCpuInfo))
+            vm_deallocate(mach_task_self_, vm_address_t(bitPattern: prevCpuInfo), prevSize)
+        }
+
+        prevCpuInfo = cpuInfoLocal
+        numPrevCpuInfo = numCpuInfoLocal
+        cpuInfo = cpuInfoLocal
+        numCpuInfo = numCpuInfoLocal
+
+        return numCPUs > 0 ? totalUsage / Double(numCPUs) : 0.0
+    }
+
+    private func getMemoryUsage() -> (used: String, total: String, percentage: Double) {
+        var stats = vm_statistics64()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.stride / MemoryLayout<integer_t>.stride)
+
+        let result = withUnsafeMutablePointer(to: &stats) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
+            }
+        }
+
+        guard result == KERN_SUCCESS else {
+            return ("--", "--", 0)
+        }
+
+        let pageSize = UInt64(vm_kernel_page_size)
+        let totalMemory = ProcessInfo.processInfo.physicalMemory
+
+        let activeMemory = UInt64(stats.active_count) * pageSize
+        let wiredMemory = UInt64(stats.wire_count) * pageSize
+        let compressedMemory = UInt64(stats.compressor_page_count) * pageSize
+
+        let usedMemory = activeMemory + wiredMemory + compressedMemory
+        let percentage = Double(usedMemory) / Double(totalMemory) * 100.0
+
+        return (formatBytes(usedMemory), formatBytes(totalMemory), percentage)
+    }
+
+    private func getDiskUsage() -> (used: String, total: String, percentage: Double) {
+        let fileManager = FileManager.default
+
+        do {
+            let attributes = try fileManager.attributesOfFileSystem(forPath: "/")
+
+            if let totalSpace = attributes[.systemSize] as? UInt64,
+               let freeSpace = attributes[.systemFreeSize] as? UInt64 {
+                let usedSpace = totalSpace - freeSpace
+                let percentage = Double(usedSpace) / Double(totalSpace) * 100.0
+                return (formatBytes(usedSpace), formatBytes(totalSpace), percentage)
+            }
+        } catch {
+            // Ignore error
+        }
+
+        return ("--", "--", 0)
+    }
+
+    private func formatBytes(_ bytes: UInt64) -> String {
+        let gb = Double(bytes) / 1_073_741_824 // 1024^3
+        if gb >= 100 {
+            return String(format: "%.0f GB", gb)
+        } else if gb >= 10 {
+            return String(format: "%.1f GB", gb)
+        } else {
+            return String(format: "%.2f GB", gb)
+        }
+    }
+
+    deinit {
+        stop()
+
+        // Clean up CPU info
+        if let cpuInfo = cpuInfo {
+            let size = vm_size_t(MemoryLayout<integer_t>.stride * Int(numCpuInfo))
+            vm_deallocate(mach_task_self_, vm_address_t(bitPattern: cpuInfo), size)
+        }
+    }
+}
+
 // MARK: - Popup Window Manager
 
 class PopupWindowManager {
@@ -631,6 +807,7 @@ class MenuBarManager: NSObject, NSMenuDelegate {
     private weak var appDelegate: AppDelegate?
     private var historySubscription: AnyCancellable?
     private var statusMenu: NSMenu?
+    private var systemMonitor: SystemMonitor?
 
     init(history: ClipboardHistory, appDelegate: AppDelegate) {
         self.history = history
@@ -638,6 +815,7 @@ class MenuBarManager: NSObject, NSMenuDelegate {
         super.init()
         setupMenuBar()
         setupHistoryObserver()
+        setupSystemMonitor()
     }
 
     private func setupMenuBar() {
@@ -658,6 +836,14 @@ class MenuBarManager: NSObject, NSMenuDelegate {
         historySubscription = history?.objectWillChange.sink { [weak self] in
             self?.updateMenu()
         }
+    }
+
+    private func setupSystemMonitor() {
+        systemMonitor = SystemMonitor()
+        systemMonitor?.onUpdate = { [weak self] tooltip in
+            self?.statusItem?.button?.toolTip = tooltip
+        }
+        systemMonitor?.start()
     }
 
     private func updateMenu() {

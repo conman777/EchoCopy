@@ -1,70 +1,53 @@
 #!/bin/bash
+set -euo pipefail
 
 # Build a proper macOS app bundle
 
-echo "🔨 Building ClipboardManager as macOS app bundle..."
-
-# Build the executable
-swift build -c release
-
-if [ $? -ne 0 ]; then
-    echo "❌ Build failed!"
-    exit 1
-fi
-
-# Create the app bundle structure
 APP_NAME="ClipboardManager"
 BUILD_DIR=".build/release"
-APP_BUNDLE="${BUILD_DIR}/${APP_NAME}.app"
+DIST_DIR="dist"
+APP_BUNDLE="${DIST_DIR}/${APP_NAME}.app"
 CONTENTS_DIR="${APP_BUNDLE}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
+ZIP_PATH="${DIST_DIR}/${APP_NAME}.app.zip"
 
-echo "📦 Creating app bundle structure..."
+echo "🔨 Building ${APP_NAME} (release)..."
+swift build -c release
+
+echo "📦 Creating app bundle..."
 
 # Remove old bundle if it exists
 rm -rf "$APP_BUNDLE"
+mkdir -p "$DIST_DIR"
 
 # Create directories
 mkdir -p "$MACOS_DIR"
 mkdir -p "${CONTENTS_DIR}/Resources"
 
 # Copy executable
-cp "${BUILD_DIR}/${APP_NAME}" "$MACOS_DIR/"
+cp "${BUILD_DIR}/${APP_NAME}" "${MACOS_DIR}/${APP_NAME}"
 
-# Create Info.plist
-cat > "${CONTENTS_DIR}/Info.plist" << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleDevelopmentRegion</key>
-    <string>en</string>
-    <key>CFBundleExecutable</key>
-    <string>ClipboardManager</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.clipboard.manager</string>
-    <key>CFBundleInfoDictionaryVersion</key>
-    <string>6.0</string>
-    <key>CFBundleName</key>
-    <string>ClipboardManager</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
-    <key>CFBundleVersion</key>
-    <string>1</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
-    <key>NSPrincipalClass</key>
-    <string>NSApplication</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-</dict>
-</plist>
-EOF
+# Copy Info.plist (used when the bundle is launched via Finder)
+cp "Sources/ClipboardManager/Info.plist" "${CONTENTS_DIR}/Info.plist"
 
-echo "✅ App bundle created at: $APP_BUNDLE"
-echo "🚀 Launching ClipboardManager..."
+# Optional overrides
+if [[ -n "${BUNDLE_ID:-}" ]]; then
+  /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${BUNDLE_ID}" "${CONTENTS_DIR}/Info.plist"
+fi
 
-# Launch the app
-open "$APP_BUNDLE"
+if [[ -n "${VERSION:-}" ]]; then
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "${CONTENTS_DIR}/Info.plist" || true
+  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION}" "${CONTENTS_DIR}/Info.plist" || true
+fi
+
+# Create a portable zip for easy install/sharing
+rm -f "${ZIP_PATH}"
+ditto -c -k --sequesterRsrc --keepParent "${APP_BUNDLE}" "${ZIP_PATH}"
+
+echo "✅ App bundle created at: ${APP_BUNDLE}"
+echo "✅ Zip created at: ${ZIP_PATH}"
+
+if [[ "${1:-}" == "--open" ]]; then
+  echo "🚀 Launching ${APP_NAME}..."
+  open "${APP_BUNDLE}"
+fi
