@@ -1,45 +1,42 @@
 # ClipboardManager
 
-A simple, fast clipboard manager for macOS built with Swift and SwiftUI.
+A modern, high-performance clipboard manager for macOS that prioritizes speed and visual clarity.
 
 ![macOS](https://img.shields.io/badge/macOS-13.0+-blue)
 ![Swift](https://img.shields.io/badge/Swift-5.9+-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
+![Version](https://img.shields.io/badge/version-1.0.4-purple)
 
-## Screenshots
+## What's New in v1.0.4 🚀
 
-<p align="center">
-  <img src="screenshots/clipboard-history.png" alt="Clipboard History" width="400">
-</p>
-
-<p align="center">
-  <img src="screenshots/settings.png" alt="Settings" width="400">
-</p>
+- **Redesigned Modern UI** - A polished, compact aesthetic with glassmorphism and smooth animations.
+- **High-Visibility Previews** - Copy images or take screenshots and see them instantly with large, clear previews.
+- **Smart Auto-Updates** - The app now downloads and installs updates automatically directly from Settings.
+- **Performance Optimized** - Information-dense layout lets you see more history at a glance.
 
 ## Features
 
-- **Clipboard History** - Automatically tracks what you copy (text, URLs, images)
-- **Search** - Quickly find past items
-- **Pin Items** - Keep frequently used snippets at the top
-- **Menu Bar App** - Lives in the macOS menu bar, no dock icon
-- **Quick Popup** - `Option+V` opens a compact picker near your cursor
-- **App Exclusions** - Prevent saving clipboard content from specific apps (e.g. password managers)
-- **In-App Updates** - Check for updates directly from Settings
-- **Persistent Storage** - History is saved and restored on app restart (up to 500 items)
+- **Clipboard History** - Automatically tracks text, URLs, and images.
+- **Large Previews** - Visual content like screenshots are displayed clearly, not just as generic icons.
+- **Quick HUD Picker** - Press `Option+V` to open a Spotlight-style quick picker at your cursor.
+- **Privacy First** - **App Exclusions** prevent sensitive data (like from password managers) from being saved.
+- **Native Experience** - Built entirely in Swift/SwiftUI for minimal resource usage and a native macOS feel.
+- **Search & Pin** - Instant filtering and the ability to keep important snippets pinned at the top.
+- **Persistent & Local** - Your history stays on your machine, saved across restarts.
 
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
 |----------|--------|
-| `Option+V` | Show quick popup near cursor |
-| `Cmd+Option+1-9` | Quick paste items 1-9 |
+| `Option+V` | Show quick HUD picker near cursor |
+| `Cmd+Option+1-9` | Quick paste items 1-9 from history |
 | `Cmd+Shift+K` | Clear all history |
 | `Cmd+,` | Open Settings |
 
 ## Installation
 
 ### Download
-Download the latest release from [GitHub Releases](https://github.com/conman777/copynoteapple/releases).
+Download the latest version from [GitHub Releases](https://github.com/conman777/copynoteapple/releases).
 
 ### Build from Source
 
@@ -52,67 +49,26 @@ Download the latest release from [GitHub Releases](https://github.com/conman777/
 git clone https://github.com/conman777/copynoteapple.git
 cd copynoteapple
 
-# Build the app bundle
-./build-app.sh
-
-# The app will be at dist/ClipboardManager.app
-# Drag it to /Applications to install
-```
-
-To build and launch immediately:
-```bash
+# Build and launch immediately
 ./build-app.sh --open
 ```
 
 ## Usage
 
-1. **Launch the app** - Click the clipboard icon in the menu bar
-2. **Copy anything** - The app automatically captures text, URLs, and images
-3. **Search** - Use the search bar to filter through history
-4. **Click to paste** - Click any item to copy it back to clipboard
-5. **Pin items** - Click the pin icon to keep important items at the top
-6. **Quick access** - Press `Option+V` anywhere for a popup picker
+1. **Launch the app** - It lives in your menu bar (look for the clipboard icon).
+2. **Copy items** - Just use `Cmd+C` as usual; the app handles the rest.
+3. **Quick Paste** - Press `Option+V` to see your last 15 items and press `Enter` or a number key to paste.
+4. **Manage History** - Open the main window to search, pin, or delete items.
 
-## Permissions
+## Privacy & Permissions
 
-The app requires:
-- **Accessibility** - For global keyboard shortcuts (Option+V)
-- You'll be prompted to grant this on first launch
-
-## Settings
-
-Access Settings via the menu bar icon (right-click) or `Cmd+,`:
-
-- **Updates** - Check for new versions
-- **Exclusions** - Add apps to exclude from clipboard tracking (e.g., 1Password, Bitwarden)
+The app requires **Accessibility Permissions** to detect the global `Option+V` shortcut. Your clipboard data is stored **only locally** in your macOS user defaults and is never transmitted anywhere.
 
 ## Project Structure
 
-```
-ClipboardManager/
-├── Package.swift              # Swift package configuration
-├── build-app.sh              # Build script
-├── Sources/
-│   └── ClipboardManager/
-│       ├── App.swift         # Main source code
-│       └── Info.plist        # App metadata
-└── dist/                     # Built app bundle
-```
-
-## How It Works
-
-- **ClipboardMonitor** - Polls the system clipboard every 500ms for changes
-- **ClipboardHistory** - Manages in-memory and persistent history
-- **GlobalShortcutHandler** - Handles Option+V via CGEventTap
-- **UpdateChecker** - Checks GitHub releases for updates
-
-## Storage
-
-Clipboard history is stored in UserDefaults. Data is stored locally on your machine.
-
-## Contributing
-
-Contributions welcome! Please open an issue or PR.
+- **App.swift** - The core logic, UI views, and state management.
+- **build-app.sh** - Creates a proper `.app` bundle for macOS.
+- **Info.plist** - Application metadata and permissions.
 
 ## License
 
