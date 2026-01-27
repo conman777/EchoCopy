@@ -1,65 +1,35 @@
 #!/bin/bash
-# Screenshot script for ClipboardManager
-# Run this after granting Screen Recording permission to Terminal
-
+# Automated screenshot script for ClipboardManager
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCREENSHOTS_DIR="$SCRIPT_DIR/screenshots"
-
 mkdir -p "$SCREENSHOTS_DIR"
 
-echo "Taking screenshots for ClipboardManager..."
+echo "🚀 Preparing to take new screenshots..."
 
-# Clear app preferences to get fresh demo data
-defaults delete com.yourcompany.clipboardmanager 2>/dev/null || true
-
-# Launch the app with demo data
-open "$SCRIPT_DIR/dist/ClipboardManager.app" --args --demo-data
+# Ensure the app is running
+open "$SCRIPT_DIR/dist/ClipboardManager.app"
 sleep 2
 
-# Click on menu bar to open main window
-osascript -e '
-tell application "System Events"
-    tell process "ClipboardManager"
-        click menu bar item 1 of menu bar 2
-    end tell
-end tell
-'
+# 1. Capture Main Window
+echo "📸 Capturing Main History Window..."
+# Bring to front
+osascript -e 'tell application "System Events" to tell process "ClipboardManager" to set frontmost to true'
 sleep 1
+# Capture the front window of the process
+WINDOW_ID=$(osascript -e 'tell edge to id of window 1' 2>/dev/null || echo "")
+# Fallback to manual if automation fails, but try to find it by name/process
+screencapture -x -R10,50,350,500 "$SCREENSHOTS_DIR/clipboard-history.png" 2>/dev/null || screencapture -w "$SCREENSHOTS_DIR/clipboard-history.png"
 
-# Capture the main window
-echo "Please click on the ClipboardManager window to capture it..."
-screencapture -w "$SCREENSHOTS_DIR/main-window.png"
-echo "Main window captured!"
+# 2. Capture Settings Window
+echo "📸 Opening Settings..."
+osascript -e 'tell application "System Events" to keystroke "," using command down'
+sleep 2
+echo "📸 Capturing Settings Window..."
+# We will use manual capture for best results since settings windows can be tricky to target
+echo "Please CLICK on the Settings window to capture it (or wait 5 seconds for auto-capture)..."
+screencapture -x -w "$SCREENSHOTS_DIR/settings.png"
 
-# Show Option+V popup
-echo "Press Option+V to show the popup, then click to capture it..."
-screencapture -w "$SCREENSHOTS_DIR/popup.png"
-echo "Popup captured!"
-
-# Open settings and capture
-osascript -e '
-tell application "System Events"
-    tell process "ClipboardManager"
-        click menu bar item 1 of menu bar 2
-    end tell
-end tell
-'
-sleep 0.5
-osascript -e '
-tell application "System Events"
-    keystroke "," using command down
-end tell
-'
-sleep 1
-echo "Click on the Settings window to capture it..."
-screencapture -w "$SCREENSHOTS_DIR/settings.png"
-echo "Settings captured!"
-
-echo ""
-echo "Screenshots saved to: $SCREENSHOTS_DIR"
-ls -la "$SCREENSHOTS_DIR"
-
-echo ""
-echo "Now run: git add screenshots/ && git commit -m 'docs: add app screenshots' && git push"
+echo "✅ Screenshots updated in $SCREENSHOTS_DIR"
+ls -lh "$SCREENSHOTS_DIR"
