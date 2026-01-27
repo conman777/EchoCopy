@@ -7,6 +7,20 @@ A modern, high-performance clipboard manager for macOS that prioritizes speed an
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Version](https://img.shields.io/badge/version-1.0.4-purple)
 
+## Screenshots
+
+<p align="center">
+  <img src="screenshots/clipboard-history.png" alt="Clipboard History" width="400">
+  <br>
+  <em>The main history view with large screenshot previews and search.</em>
+</p>
+
+<p align="center">
+  <img src="screenshots/settings.png" alt="Settings" width="400">
+  <br>
+  <em>Settings view with auto-update and exclusion lists.</em>
+</p>
+
 ## What's New in v1.0.4 🚀
 
 - **Redesigned Modern UI** - A polished, compact aesthetic with glassmorphism and smooth animations.
