@@ -1805,7 +1805,7 @@ struct SettingsView: View {
     }
 
     private var currentVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.3"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.4"
     }
 
     var body: some View {
@@ -2047,7 +2047,7 @@ class UpdateChecker: ObservableObject {
     private let githubRepo = "copynoteapple"
 
     private var currentVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.3"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.4"
     }
 
     func checkForUpdates() {
