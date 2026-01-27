@@ -30,7 +30,7 @@ Filter through hundreds of items instantly with the built-in search. Keep your m
 Automatically ignore data copied from sensitive apps like 1Password, Bitwarden, or Keychain. You can easily add any app to the exclusion list in Settings.
 
 <p align="center">
-  <img src="screenshots/settings.png" alt="Settings and Exclusions" width="500">
+  <img src="screenshots/settings-new.png" alt="Settings and Exclusions" width="500">
 </p>
 
 ### 🚀 Smart Auto-Updates
