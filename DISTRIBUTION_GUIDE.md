@@ -58,7 +58,7 @@ security find-identity -v -p codesigning
 ### Step 4: Build and Sign
 
 ```bash
-cd "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple"
+cd "/Users/yourname/path/to/copynoteapple"
 ./build-and-notarize.sh
 ```
 
