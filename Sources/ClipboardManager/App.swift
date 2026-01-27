@@ -83,40 +83,6 @@ class ClipboardHistory: ObservableObject {
     init() {
         loadHistory()
         loadExcludedApps()
-        // Add demo data for screenshots if empty
-        if items.isEmpty {
-            loadDemoData()
-        }
-    }
-
-    private func loadDemoData() {
-        let demoItems: [(String, ContentType, Bool, String?)] = [
-            ("https://github.com/conman777/copynoteapple", .url, true, nil),
-            ("func calculateTotal(_ items: [Item]) -> Double {\n    return items.reduce(0) { $0 + $1.price }\n}", .text, false, nil),
-            ("Meeting notes: Discussed Q4 roadmap, need to finalize by Friday. Action items assigned to team.", .text, false, nil),
-            ("https://developer.apple.com/documentation/swiftui", .url, false, nil),
-            ("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB...", .text, false, nil),
-            ("SELECT * FROM users WHERE created_at > '2024-01-01' ORDER BY name;", .text, false, nil),
-            ("The quick brown fox jumps over the lazy dog", .text, false, nil),
-        ]
-
-        for (index, (content, type, pinned, filename)) in demoItems.enumerated() {
-            let timestamp = Date().addingTimeInterval(Double(-index * 300)) // 5 min apart
-            let item = ClipboardItem(
-                content: content,
-                contentType: type,
-                timestamp: timestamp,
-                isPinned: pinned,
-                filename: filename
-            )
-            items.append(item)
-        }
-        // Sort: pinned first, then by timestamp descending
-        items.sort { (a, b) in
-            if a.isPinned != b.isPinned { return a.isPinned }
-            return a.timestamp > b.timestamp
-        }
-        saveHistory()
     }
 
     func addItem(_ content: String, contentType: ContentType = .text, filename: String? = nil, rtfContent: String? = nil) {
@@ -244,13 +210,15 @@ class ClipboardHistory: ObservableObject {
     }
 
     func addExcludedApp(_ bundleID: String) {
+        let trimmed = bundleID.trimmingCharacters(in: .whitespacesAndNewlines)
+
         // Validate bundle ID format and prevent adding this app
-        guard !bundleID.isEmpty,
-              bundleID.contains("."),
-              bundleID != Bundle.main.bundleIdentifier else {
+        guard !trimmed.isEmpty,
+              trimmed.contains("."),
+              trimmed != Bundle.main.bundleIdentifier else {
             return
         }
-        excludedApps.insert(bundleID)
+        excludedApps.insert(trimmed)
         saveExcludedApps()
     }
 
@@ -642,54 +610,48 @@ struct PopupView: View {
     var body: some View {
         VStack(spacing: 0) {
             if history.items.isEmpty {
-                // Empty State
-                VStack(spacing: 8) {
-                    Image(systemName: "doc.text.magnifyingglass")
-                        .font(.system(size: 20))
-                        .foregroundColor(.secondary)
-
-                    Text("No items")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(.secondary)
+                VStack(spacing: 12) {
+                    Image(systemName: "doc.on.clipboard")
+                        .font(.system(size: 18))
+                        .foregroundColor(.secondary.opacity(0.4))
+                    Text("Empty")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(.secondary.opacity(0.6))
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color(.windowBackgroundColor))
             } else {
-                // Items List
-                ScrollView(showsIndicators: true) {
-                    VStack(spacing: 1.5) {
-                        ForEach(Array(history.items.enumerated()), id: \.element.id) { index, item in
-                            PopupItemRow(
-                                item: item,
-                                index: index,
-                                isHovered: hoveredItemId == item.id,
-                                onHover: { hovered in
-                                    hoveredItemId = hovered ? item.id : nil
-                                },
-                                onSelect: {
-                                    copyItem(item)
-                                    onDismiss()
-                                }
-                            )
+                VStack(alignment: .leading, spacing: 4) {
+                    ScrollView(showsIndicators: false) {
+                        VStack(spacing: 1) {
+                            ForEach(Array(history.items.prefix(15).enumerated()), id: \.element.id) { index, item in
+                                PopupItemRow(
+                                    item: item,
+                                    index: index,
+                                    isHovered: hoveredItemId == item.id,
+                                    onHover: { hovered in
+                                        hoveredItemId = hovered ? item.id : nil
+                                    },
+                                    onSelect: {
+                                        copyItem(item)
+                                        onDismiss()
+                                    }
+                                )
+                            }
                         }
+                        .padding(4)
                     }
-                    .padding(4)
                 }
-                .background(Color(.windowBackgroundColor))
             }
         }
-        .frame(width: 240, height: 190)
+        .frame(width: 260, height: 360)
         .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color(.windowBackgroundColor))
-                .shadow(color: Color.black.opacity(0.18), radius: 12, x: 0, y: 4)
-                .shadow(color: Color.black.opacity(0.08), radius: 4, x: 0, y: 1)
+            VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.primary.opacity(0.1), lineWidth: 0.5)
         )
-        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
 
     private func copyItem(_ item: ClipboardItem) {
@@ -706,10 +668,10 @@ struct PopupItemRow: View {
 
     var contentIcon: String {
         switch item.contentType {
-        case .text: return "doc.text.fill"
-        case .image: return "photo.fill"
+        case .text: return "doc.text"
+        case .image: return "photo"
         case .url: return "link"
-        case .file: return "doc.fill"
+        case .file: return "doc"
         }
     }
 
@@ -725,9 +687,10 @@ struct PopupItemRow: View {
     var contentPreview: String {
         switch item.contentType {
         case .text:
-            let lines = item.content.components(separatedBy: .newlines)
+            let content = item.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            let lines = content.components(separatedBy: .newlines)
             let firstLine = lines.first ?? ""
-            return firstLine.count > 60 ? String(firstLine.prefix(60)) + "..." : firstLine
+            return firstLine.count > 40 ? String(firstLine.prefix(40)) + "..." : firstLine
         case .image: return item.filename ?? "Image"
         case .url: return item.content
         case .file: return item.filename ?? "File"
@@ -735,43 +698,37 @@ struct PopupItemRow: View {
     }
 
     var body: some View {
-        HStack(spacing: 4) {
-            // Small icon
-            Circle()
-                .fill(iconColor.opacity(isHovered ? 0.2 : 0.15))
-                .frame(width: 6, height: 6)
+        HStack(spacing: 8) {
+            Text("\(index + 1)")
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundColor(isHovered ? .white.opacity(0.8) : .secondary.opacity(0.4))
+                .frame(width: 12)
 
-            // Content - just the text preview
+            Image(systemName: contentIcon)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(isHovered ? .white : iconColor)
+                .frame(width: 14)
+
             Text(contentPreview)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(.primary)
+                .font(.system(size: 11, weight: .medium, design: .rounded))
+                .foregroundColor(isHovered ? .white : .primary)
                 .lineLimit(1)
                 .truncationMode(.tail)
 
             Spacer(minLength: 0)
 
-            // Copy indicator
             if isHovered {
-                Image(systemName: "arrow.right")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundColor(iconColor)
-                    .transition(.scale.combined(with: .opacity))
+                Image(systemName: "return")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(.white.opacity(0.6))
             }
         }
-        .padding(.horizontal, 5)
-        .padding(.vertical, 3)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
         .background(
-            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                .fill(isHovered ? Color(.controlBackgroundColor).opacity(0.7) : Color(.controlBackgroundColor).opacity(0.3))
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(isHovered ? Color.blue : Color.clear)
         )
-        .overlay(
-            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                .strokeBorder(
-                    isHovered ? iconColor.opacity(0.4) : Color.clear,
-                    lineWidth: isHovered ? 1 : 0
-                )
-        )
-        .animation(.spring(response: 0.15, dampingFraction: 0.8), value: isHovered)
         .onHover { hovering in
             onHover(hovering)
         }
@@ -780,27 +737,12 @@ struct PopupItemRow: View {
         }
         .contentShape(Rectangle())
     }
-
-    private func relativeTime(from date: Date) -> String {
-        let seconds = Date().timeIntervalSince(date)
-
-        if seconds < 60 {
-            return "Just now"
-        } else if seconds < 3600 {
-            let minutes = Int(seconds / 60)
-            return "\(minutes)m ago"
-        } else if seconds < 86400 {
-            let hours = Int(seconds / 3600)
-            return "\(hours)h ago"
-        } else {
-            let days = Int(seconds / 86400)
-            return "\(days)d ago"
-        }
-    }
 }
+
 
 // MARK: - Menu Bar Manager
 
+@MainActor
 class MenuBarManager: NSObject, NSMenuDelegate {
     private var statusItem: NSStatusItem?
     private weak var history: ClipboardHistory?
@@ -833,9 +775,11 @@ class MenuBarManager: NSObject, NSMenuDelegate {
 
     private func setupHistoryObserver() {
         // Subscribe to changes in the history
-        historySubscription = history?.objectWillChange.sink { [weak self] in
-            self?.updateMenu()
-        }
+        historySubscription = history?.$items
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.updateMenu()
+            }
     }
 
     private func setupSystemMonitor() {
@@ -927,6 +871,7 @@ class MenuBarManager: NSObject, NSMenuDelegate {
     }
 
     @objc private func openSettings() {
+        NSApp.activate(ignoringOtherApps: true)
         NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
     }
 
@@ -1258,10 +1203,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Store reference
         self.mainWindow = window
 
-        window.minSize = NSSize(width: 320, height: 260)
+        window.minSize = NSSize(width: 320, height: 400)
 
         if !hasAppliedPreferredSize {
-            let preferredContentSize = NSSize(width: 340, height: 360)
+            let preferredContentSize = NSSize(width: 350, height: 480)
             window.setContentSize(preferredContentSize)
             hasAppliedPreferredSize = true
         }
@@ -1302,6 +1247,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         popupWindowManager?.showPopup()
     }
 
+    @objc func showSettings() {
+        NSApp.activate(ignoringOtherApps: true)
+        
+        // Use the standard action but ensure it has a target
+        if !NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) {
+            // Fallback: try to find a window with "Settings" in title
+            for window in NSApp.windows {
+                if window.title.contains("Settings") || window.frameAutosaveName.contains("Settings") {
+                    window.makeKeyAndOrderFront(nil)
+                    return
+                }
+            }
+        }
+    }
+
     deinit {
         // Clean up event monitors
         if let monitor = localEventMonitor {
@@ -1319,6 +1279,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
 struct ContentView: View {
     @EnvironmentObject var history: ClipboardHistory
+    @Environment(\.openWindow) private var openWindow
     @State private var searchText = ""
 
     var filteredItems: [ClipboardItem] {
@@ -1337,149 +1298,204 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
-            Color(.windowBackgroundColor).ignoresSafeArea()
+            // Use Material background for a native feel
+            VisualEffectView(material: .sidebar, blendingMode: .behindWindow)
+                .ignoresSafeArea()
                 .background(WindowAccessor { window in
-                    // Ensure our AppKit configuration is applied to the exact SwiftUI window
                     if let app = NSApp.delegate as? AppDelegate {
                         app.applyWindowBehavior(to: window)
                     }
                 })
 
             VStack(spacing: 0) {
-                // Header with title
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Clipboard History")
-                        .font(.system(size: 20, weight: .bold))
-                        .foregroundColor(.primary)
+                // Compact Header
+                VStack(spacing: 10) {
+                    HStack(alignment: .center) {
+                        Text("Clipboard")
+                            .font(.system(size: 18, weight: .bold, design: .rounded))
+                        
+                        Spacer()
+                        
+                        Button {
+                            openWindow(id: "settings")
+                        } label: {
+                            Image(systemName: "slider.horizontal.3")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundColor(.secondary)
+                                .frame(width: 24, height: 24)
+                                .background(Color.primary.opacity(0.01))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Settings")
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.top, 12)
 
-                    // Search bar
+                    // Compact Search bar
                     HStack(spacing: 8) {
                         Image(systemName: "magnifyingglass")
-                            .foregroundColor(.secondary)
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(.secondary.opacity(0.6))
+                        
                         TextField("Search...", text: $searchText)
                             .textFieldStyle(.plain)
+                            .font(.system(size: 12, weight: .medium, design: .rounded))
+                        
                         if !searchText.isEmpty {
-                            Button {
-                                searchText = ""
-                            } label: {
+                            Button { searchText = "" } label: {
                                 Image(systemName: "xmark.circle.fill")
-                                    .foregroundColor(.secondary)
+                                    .foregroundColor(.secondary.opacity(0.4))
+                                    .font(.system(size: 11))
                             }
                             .buttonStyle(.plain)
-                            .help("Clear search")
                         }
                     }
                     .padding(.vertical, 6)
                     .padding(.horizontal, 10)
                     .background(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(Color(.controlBackgroundColor).opacity(0.9))
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.primary.opacity(0.04))
                     )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-                    )
+                    .padding(.horizontal, 10)
                 }
-                .padding(12)
+                .padding(.bottom, 10)
 
                 // Content
                 if history.items.isEmpty {
-                    VStack(spacing: 14) {
-                        Image(systemName: "doc.text.magnifyingglass")
-                            .font(.system(size: 42))
+                    VStack(spacing: 16) {
+                        Spacer()
+                        
+                        ZStack {
+                            Circle()
+                                .fill(Color.blue.opacity(0.1))
+                                .frame(width: 80, height: 80)
+                            
+                            Image(systemName: "doc.on.clipboard")
+                                .font(.system(size: 32))
+                                .foregroundColor(.blue)
+                        }
+
+                        VStack(spacing: 4) {
+                            Text("Your history is empty")
+                                .font(.system(size: 15, weight: .semibold))
+                            
+                            Text("Copied items will appear here.")
+                                .font(.system(size: 13))
+                                .foregroundColor(.secondary)
+                        }
+
+                        Text("Press ⌥V to open quick paste")
+                            .font(.system(size: 11, weight: .medium))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(Color.primary.opacity(0.05))
+                            .cornerRadius(6)
                             .foregroundColor(.secondary)
-
-                        Text("No items yet")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundColor(.primary)
-
-                        Text("Copy something to get started")
-                            .font(.system(size: 14))
-                            .foregroundColor(.secondary)
-
-                        Text("Use Option+V for the quick paste popup.")
-                            .font(.system(size: 12))
-                            .foregroundColor(Color.secondary.opacity(0.8))
+                        
+                        Spacer()
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if filteredItems.isEmpty {
                     VStack(spacing: 12) {
+                        Spacer()
                         Image(systemName: "magnifyingglass")
-                            .font(.system(size: 36))
+                            .font(.system(size: 32))
+                            .foregroundColor(.secondary.opacity(0.5))
+
+                        Text("No matches found")
+                            .font(.system(size: 15, weight: .medium))
                             .foregroundColor(.secondary)
 
-                        Text("No results")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundColor(.primary)
-
-                        Text("Try a different search.")
-                            .font(.system(size: 13))
-                            .foregroundColor(.secondary)
-
-                        Button("Clear search") {
+                        Button("Clear Search") {
                             searchText = ""
                         }
                         .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        Spacer()
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     ScrollView {
-                        LazyVStack(spacing: 6) {
+                        LazyVStack(spacing: 4) {
                             if !pinnedItems.isEmpty {
                                 SectionHeader(title: "Pinned")
+                                    .padding(.horizontal, 12)
                                 ForEach(pinnedItems) { item in
                                     ClipboardItemRow(item: item, history: history)
                                 }
+                                .padding(.horizontal, 4)
+                                
                                 if !unpinnedItems.isEmpty {
-                                    SectionHeader(title: "History")
+                                    SectionHeader(title: "Recent")
+                                        .padding(.horizontal, 12)
+                                        .padding(.top, 8)
                                 }
                             }
 
                             ForEach(unpinnedItems) { item in
                                 ClipboardItemRow(item: item, history: history)
                             }
+                            .padding(.horizontal, 4)
                         }
-                        .padding(8)
+                        .padding(.vertical, 8)
                     }
                 }
 
                 // Footer
-                HStack(spacing: 12) {
-                    Button(role: .destructive) {
-                        history.clearHistory()
-                    } label: {
-                        Label("Clear All", systemImage: "trash")
-                            .font(.system(size: 13, weight: .medium))
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(.red)
-                    .keyboardShortcut("k", modifiers: [.command, .shift])
-                    .contextMenu {
+                HStack {
+                    Menu {
                         Button(role: .destructive) {
+                            history.clearHistory()
+                        } label: {
+                            Label("Clear All History", systemImage: "trash")
+                        }
+                        
+                        Button {
                             history.clearUnpinnedHistory()
                         } label: {
-                            Label("Clear History (Keep Pinned)", systemImage: "trash")
+                            Label("Clear Unpinned Only", systemImage: "pin.slash")
                         }
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
                     }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("Clear options")
 
                     Spacer()
 
-                    VStack(alignment: .trailing, spacing: 2) {
-                        Text("\(history.items.count) items")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(.primary)
-
-                        Text("Command+Shift+K clears history")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                    }
+                    Text("\(history.items.count) items")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.secondary)
                 }
-                .padding(10)
-                .background(Color(.controlBackgroundColor))
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(VisualEffectView(material: .titlebar, blendingMode: .withinWindow).opacity(0.5))
                 .borderTop()
             }
         }
-        .frame(minWidth: 320, minHeight: 240)
+        .frame(minWidth: 320, minHeight: 400)
+    }
+}
+
+// MARK: - Visual Effect View
+struct VisualEffectView: NSViewRepresentable {
+    let material: NSVisualEffectView.Material
+    let blendingMode: NSVisualEffectView.BlendingMode
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = material
+        view.blendingMode = blendingMode
+        view.state = .active
+        return view
+    }
+
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
+        nsView.material = material
+        nsView.blendingMode = blendingMode
     }
 }
 
@@ -1564,155 +1580,181 @@ struct ClipboardItemRow: View {
 
     var contentIcon: String {
         switch item.contentType {
-        case .text:
-            return "doc.text"
-        case .image:
-            return "photo"
-        case .url:
-            return "link"
-        case .file:
-            return "doc"
+        case .text: return "doc.text"
+        case .image: return "photo"
+        case .url: return "link"
+        case .file: return "doc"
         }
     }
 
     var iconColor: Color {
         switch item.contentType {
-        case .text:
-            return .blue
-        case .image:
-            return .purple
-        case .url:
-            return .orange
-        case .file:
-            return .green
+        case .text: return .blue
+        case .image: return .purple
+        case .url: return .orange
+        case .file: return .green
         }
     }
 
     var contentPreview: String {
         switch item.contentType {
         case .text:
-            return item.content.count > 100 ? String(item.content.prefix(100)) + "..." : item.content
-        case .image:
-            return item.filename ?? "Image"
-        case .url:
-            return item.content
-        case .file:
-            return item.filename ?? "[File]"
+            return item.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        case .image: return item.filename ?? "Image"
+        case .url: return item.content
+        case .file: return item.filename ?? "[File]"
         }
     }
 
     var contentTypeLabel: String {
         switch item.contentType {
-        case .text:
-            return "Text"
-        case .image:
-            return "Image"
-        case .url:
-            return "Link"
-        case .file:
-            return "File"
+        case .text: return "Text"
+        case .image: return "Image"
+        case .url: return "Link"
+        case .file: return "File"
         }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 10) {
-                // Icon or Image Thumbnail
-                if item.contentType == .image, let data = Data(base64Encoded: item.content), let nsImage = NSImage(data: data) {
-                    // Show actual image thumbnail
+            if item.contentType == .image, let data = Data(base64Encoded: item.content), let nsImage = NSImage(data: data) {
+                // Large Image Layout
+                VStack(alignment: .leading, spacing: 8) {
                     Image(nsImage: nsImage)
                         .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: 36, height: 36)
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 140)
+                        .background(Color.primary.opacity(0.03))
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 6)
-                                .stroke(iconColor.opacity(0.3), lineWidth: 1)
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(Color.primary.opacity(0.1), lineWidth: 0.5)
                         )
-                } else {
-                    // Show icon for other types
-                    ZStack {
-                        Circle()
-                            .fill(iconColor.opacity(0.1))
-                        Image(systemName: contentIcon)
-                            .foregroundColor(iconColor)
-                            .font(.system(size: 12, weight: .semibold))
-                    }
-                    .frame(width: 36, height: 36)
-                }
+                    
+                    HStack {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(item.filename ?? "Screenshot")
+                                .font(.system(size: 11, weight: .bold, design: .rounded))
+                                .foregroundColor(.primary)
+                            
+                            HStack(spacing: 6) {
+                                Text(item.timestamp.formatted(date: .omitted, time: .shortened))
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundColor(.secondary.opacity(0.6))
+                                
+                                if item.isPinned {
+                                    Image(systemName: "pin.fill")
+                                        .font(.system(size: 8))
+                                        .foregroundColor(.orange)
+                                }
+                            }
+                        }
+                        
+                        Spacer()
+                        
+                        // Action buttons for image
+                        if isHovered || item.isPinned {
+                            HStack(spacing: 4) {
+                                Button(action: { pasteItem() }) {
+                                    Image(systemName: "doc.on.doc.fill")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundColor(.blue)
+                                        .frame(width: 26, height: 26)
+                                        .background(Color.blue.opacity(0.1))
+                                        .clipShape(Circle())
+                                }
+                                .buttonStyle(.plain)
+                                .opacity(isHovered ? 1 : 0)
 
-                // Content
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(contentPreview)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.primary)
-                        .lineLimit(2)
-                        .truncationMode(.tail)
-
-                    HStack(spacing: 8) {
-                        Text(contentTypeLabel)
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(.secondary)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color(.controlBackgroundColor))
-                            .cornerRadius(4)
-
-                        Text(item.timestamp.formatted(date: .omitted, time: .shortened))
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-
-                        if item.isPinned {
-                            Image(systemName: "pin.fill")
-                                .font(.system(size: 9))
-                                .foregroundColor(.orange)
+                                Button(action: { history.togglePin(for: item) }) {
+                                    Image(systemName: item.isPinned ? "pin.fill" : "pin")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundColor(item.isPinned ? .orange : .secondary)
+                                        .frame(width: 26, height: 26)
+                                        .background(item.isPinned ? Color.orange.opacity(0.1) : Color.primary.opacity(0.05))
+                                        .clipShape(Circle())
+                                }
+                                .buttonStyle(.plain)
+                            }
                         }
                     }
                 }
-
-                Spacer()
-
-                // Action buttons
-                HStack(spacing: 8) {
-                    Button(action: {
-                        pasteItem()
-                    }) {
-                        Image(systemName: "doc.on.doc")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(.blue)
-                            .frame(width: 28, height: 28)
+                .padding(10)
+            } else {
+                // Compact Text/URL/File Layout
+                HStack(spacing: 10) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(iconColor.opacity(0.1))
+                        
+                        Image(systemName: contentIcon)
+                            .foregroundColor(iconColor)
+                            .font(.system(size: 11, weight: .bold))
                     }
-                    .buttonStyle(.plain)
-                    .help("Paste to clipboard")
-                    .symbolRenderingMode(.monochrome)
-                    .opacity(isHovered ? 1 : 0.85)
+                    .frame(width: 28, height: 28)
 
-                    Button(action: {
-                        history.togglePin(for: item)
-                    }) {
-                        Image(systemName: item.isPinned ? "pin.fill" : "pin")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(item.isPinned ? .orange : .secondary)
-                            .frame(width: 28, height: 28)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(contentPreview)
+                            .font(.system(size: 12, weight: .medium, design: .rounded))
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+
+                        HStack(spacing: 6) {
+                            Text(item.timestamp.formatted(date: .omitted, time: .shortened))
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundColor(.secondary.opacity(0.6))
+
+                            if item.isPinned {
+                                Image(systemName: "pin.fill")
+                                    .font(.system(size: 8))
+                                    .foregroundColor(.orange)
+                            }
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .help(item.isPinned ? "Unpin" : "Pin")
-                    .symbolRenderingMode(.monochrome)
-                    .opacity(isHovered ? 1 : 0.85)
+
+                    Spacer(minLength: 4)
+
+                    if isHovered || item.isPinned {
+                        HStack(spacing: 2) {
+                            Button(action: { pasteItem() }) {
+                                Image(systemName: "doc.on.doc.fill")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundColor(.blue)
+                                    .frame(width: 22, height: 22)
+                                    .background(Color.blue.opacity(0.1))
+                                    .clipShape(Circle())
+                            }
+                            .buttonStyle(.plain)
+                            .opacity(isHovered ? 1 : 0)
+
+                            Button(action: { history.togglePin(for: item) }) {
+                                Image(systemName: item.isPinned ? "pin.fill" : "pin")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundColor(item.isPinned ? .orange : .secondary)
+                                    .frame(width: 22, height: 22)
+                                    .background(item.isPinned ? Color.orange.opacity(0.1) : Color.primary.opacity(0.05))
+                                    .clipShape(Circle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .transition(.opacity)
+                    }
                 }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
             }
-            .padding(10)
         }
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color(.controlBackgroundColor).opacity(isHovered ? 0.95 : 0.88))
+                .fill(isHovered ? Color.primary.opacity(0.05) : Color.clear)
         )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(Color.primary.opacity(isHovered ? 0.18 : 0.08), lineWidth: 1)
-        )
+        .padding(.horizontal, 4)
         .onHover { hovering in
-            isHovered = hovering
+            withAnimation(.easeInOut(duration: 0.1)) {
+                isHovered = hovering
+            }
         }
         .contentShape(Rectangle())
         .contextMenu {
@@ -1752,14 +1794,18 @@ struct SettingsView: View {
     @State private var showInvalidWarning = false
     @State private var selectedTab = 0
 
+    private var trimmedBundleID: String {
+        newAppBundleID.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     var isValidBundleID: Bool {
-        return !newAppBundleID.isEmpty &&
-               newAppBundleID.contains(".") &&
-               newAppBundleID != Bundle.main.bundleIdentifier
+        return !trimmedBundleID.isEmpty &&
+               trimmedBundleID.contains(".") &&
+               trimmedBundleID != Bundle.main.bundleIdentifier
     }
 
     private var currentVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.2"
     }
 
     var body: some View {
@@ -1909,17 +1955,17 @@ struct SettingsView: View {
 
                     Button("Add") {
                         if isValidBundleID {
-                            history.addExcludedApp(newAppBundleID)
+                            history.addExcludedApp(trimmedBundleID)
                             newAppBundleID = ""
                             showInvalidWarning = false
                         } else {
                             showInvalidWarning = true
                         }
                     }
-                    .disabled(newAppBundleID.isEmpty)
+                    .disabled(trimmedBundleID.isEmpty)
                 }
 
-                if showInvalidWarning && !isValidBundleID && !newAppBundleID.isEmpty {
+                if showInvalidWarning && !isValidBundleID && !trimmedBundleID.isEmpty {
                     Text("Invalid bundle ID format. Must contain '.' (e.g., com.company.app)")
                         .font(.system(size: 11))
                         .foregroundColor(.red)
@@ -1987,7 +2033,7 @@ class UpdateChecker: ObservableObject {
     private let githubRepo = "copynoteapple"
 
     private var currentVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.2"
     }
 
     func checkForUpdates() {
@@ -2007,6 +2053,7 @@ class UpdateChecker: ObservableObject {
 
         var request = URLRequest(url: url)
         request.setValue("application/vnd.github.v3+json", forHTTPHeaderField: "Accept")
+        request.setValue("ClipboardManager/\(currentVersion)", forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 10
 
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
@@ -2020,15 +2067,22 @@ class UpdateChecker: ObservableObject {
                     return
                 }
 
-                guard let data = data else {
-                    self.errorMessage = "No data received"
-                    return
+                // Check for 404 (no releases yet)
+                if let httpResponse = response as? HTTPURLResponse {
+                    if httpResponse.statusCode == 404 {
+                        self.errorMessage = "No releases found"
+                        self.updateAvailable = false
+                        return
+                    }
+
+                    if !(200...299).contains(httpResponse.statusCode) {
+                        self.errorMessage = "Update check failed (HTTP \(httpResponse.statusCode))"
+                        return
+                    }
                 }
 
-                // Check for 404 (no releases yet)
-                if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 404 {
-                    self.errorMessage = "No releases found"
-                    self.updateAvailable = false
+                guard let data = data else {
+                    self.errorMessage = "No data received"
                     return
                 }
 
@@ -2090,6 +2144,11 @@ struct ClipboardManagerApp: App {
                 .environmentObject(history)
         }
         .windowStyle(.hiddenTitleBar)
+
+        Window("Settings", id: "settings") {
+            SettingsView()
+                .environmentObject(history)
+        }
 
         Settings {
             SettingsView()

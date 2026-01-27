@@ -14,8 +14,8 @@ echo "Taking screenshots for ClipboardManager..."
 # Clear app preferences to get fresh demo data
 defaults delete com.yourcompany.clipboardmanager 2>/dev/null || true
 
-# Launch the app
-open "$SCRIPT_DIR/dist/ClipboardManager.app"
+# Launch the app with demo data
+open "$SCRIPT_DIR/dist/ClipboardManager.app" --args --demo-data
 sleep 2
 
 # Click on menu bar to open main window
