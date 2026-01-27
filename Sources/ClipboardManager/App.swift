@@ -1805,7 +1805,7 @@ struct SettingsView: View {
     }
 
     private var currentVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.2"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.3"
     }
 
     var body: some View {
@@ -1855,10 +1855,22 @@ struct SettingsView: View {
                                     }
                                 }
 
-                                Button("Download Update") {
-                                    updateChecker.openDownloadPage()
+                                Button {
+                                    updateChecker.downloadAndInstallUpdate()
+                                } label: {
+                                    if updateChecker.isDownloading {
+                                        HStack(spacing: 8) {
+                                            ProgressView()
+                                                .scaleEffect(0.5)
+                                                .frame(width: 12, height: 12)
+                                            Text("Downloading...")
+                                        }
+                                    } else {
+                                        Text("Download & Install Update")
+                                    }
                                 }
                                 .buttonStyle(.borderedProminent)
+                                .disabled(updateChecker.isDownloading)
                             }
                         } else if updateChecker.latestVersion != nil {
                             HStack {
@@ -2025,6 +2037,8 @@ class UpdateChecker: ObservableObject {
     @Published var latestVersion: String?
     @Published var downloadURL: String?
     @Published var isChecking = false
+    @Published var isDownloading = false
+    @Published var downloadProgress: Double = 0
     @Published var lastCheckDate: Date?
     @Published var errorMessage: String?
 
@@ -2033,7 +2047,7 @@ class UpdateChecker: ObservableObject {
     private let githubRepo = "copynoteapple"
 
     private var currentVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.2"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.3"
     }
 
     func checkForUpdates() {
@@ -2067,7 +2081,6 @@ class UpdateChecker: ObservableObject {
                     return
                 }
 
-                // Check for 404 (no releases yet)
                 if let httpResponse = response as? HTTPURLResponse {
                     if httpResponse.statusCode == 404 {
                         self.errorMessage = "No releases found"
@@ -2089,14 +2102,17 @@ class UpdateChecker: ObservableObject {
                 do {
                     if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                        let tagName = json["tag_name"] as? String,
-                       let htmlURL = json["html_url"] as? String {
+                       let assets = json["assets"] as? [[String: Any]] {
 
-                        // Remove 'v' prefix if present (e.g., "v1.0.1" -> "1.0.1")
+                        // Find the zip asset
+                        if let zipAsset = assets.first(where: { ($0["name"] as? String)?.hasSuffix(".zip") == true }),
+                           let downloadURL = zipAsset["browser_download_url"] as? String {
+                            self.downloadURL = downloadURL
+                        }
+
                         let latestVersion = tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName
                         self.latestVersion = latestVersion
-                        self.downloadURL = htmlURL
 
-                        // Compare versions
                         self.updateAvailable = self.isNewerVersion(latestVersion, than: self.currentVersion)
                         self.errorMessage = nil
                     } else {
@@ -2107,6 +2123,90 @@ class UpdateChecker: ObservableObject {
                 }
             }
         }.resume()
+    }
+
+    func downloadAndInstallUpdate() {
+        guard let downloadURLString = downloadURL, let url = URL(string: downloadURLString) else { return }
+        
+        isDownloading = true
+        downloadProgress = 0
+        errorMessage = nil
+        
+        let destinationURL = FileManager.default.temporaryDirectory.appendingPathComponent("ClipboardManagerUpdate.zip")
+        
+        // Remove old update file if exists
+        try? FileManager.default.removeItem(at: destinationURL)
+        
+        let task = URLSession.shared.downloadTask(with: url) { [weak self] location, response, error in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.isDownloading = false
+                
+                if let error = error {
+                    self.errorMessage = "Download failed: \(error.localizedDescription)"
+                    return
+                }
+                
+                guard let location = location else {
+                    self.errorMessage = "Download failed: No location"
+                    return
+                }
+                
+                do {
+                    try FileManager.default.moveItem(at: location, to: destinationURL)
+                    self.installUpdate(from: destinationURL)
+                } catch {
+                    self.errorMessage = "Failed to save update: \(error.localizedDescription)"
+                }
+            }
+        }
+        
+        task.resume()
+    }
+
+    private func installUpdate(from zipURL: URL) {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("ClipboardManagerExtract")
+        try? FileManager.default.removeItem(at: tempDir)
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+        process.arguments = ["-q", zipURL.path, "-d", tempDir.path]
+        
+        do {
+            try process.run()
+            process.waitUntilExit()
+            
+            // Find the .app in the extracted folder
+            let contents = try FileManager.default.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil)
+            guard let appBundle = contents.first(where: { $0.pathExtension == "app" }) else {
+                errorMessage = "Could not find app bundle in update"
+                return
+            }
+            
+            // We'll use a shell script to replace the app and restart it
+            // This is necessary because we can't easily replace the running executable
+            let currentAppURL = Bundle.main.bundleURL
+            let script = """
+            sleep 1
+            rm -rf "\(currentAppURL.path)"
+            cp -R "\(appBundle.path)" "\(currentAppURL.path)"
+            open "\(currentAppURL.path)"
+            """
+            
+            let updateScriptURL = FileManager.default.temporaryDirectory.appendingPathComponent("update_script.sh")
+            try script.write(to: updateScriptURL, atomically: true, encoding: .utf8)
+            
+            let restartProcess = Process()
+            restartProcess.executableURL = URL(fileURLWithPath: "/bin/sh")
+            restartProcess.arguments = [updateScriptURL.path]
+            try restartProcess.run()
+            
+            NSApplication.shared.terminate(nil)
+            
+        } catch {
+            errorMessage = "Installation failed: \(error.localizedDescription)"
+        }
     }
 
     private func isNewerVersion(_ new: String, than current: String) -> Bool {

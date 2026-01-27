@@ -7,7 +7,7 @@ echo "🏗️  Building Clipboard Manager for distribution..."
 DEVELOPER_ID="Developer ID Application: Your Name (TEAM_ID)"
 BUNDLE_ID="com.yourcompany.clipboardmanager"
 APP_NAME="ClipboardManager"
-VERSION="1.0.2"
+VERSION="1.0.3"
 
 # Build paths
 BUILD_DIR=".build/release"
