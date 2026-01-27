@@ -1,14 +1,14 @@
 #!/bin/bash
 
-# ClipboardManager Build and Run Script
+# Snaply Build and Run Script
 
-echo "🔨 Building ClipboardManager..."
+echo "🔨 Building Snaply..."
 swift build -c release
 
 if [ $? -eq 0 ]; then
     echo "✅ Build successful!"
-    echo "🚀 Launching ClipboardManager..."
-    ./.build/release/ClipboardManager &
+    echo "🚀 Launching Snaply..."
+    ./.build/release/Snaply &
 else
     echo "❌ Build failed!"
     exit 1

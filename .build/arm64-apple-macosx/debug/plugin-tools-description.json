@@ -19,27 +19,27 @@
   "swiftCommands" : {
     "C.ClipboardManager-arm64-apple-macosx26.0-debug.module" : {
       "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
-      "fileList" : "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/debug/ClipboardManager.build/sources",
-      "importPath" : "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/debug/Modules",
+      "fileList" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/debug/ClipboardManager.build/sources",
+      "importPath" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/debug/Modules",
       "inputs" : [
         {
           "kind" : "file",
-          "name" : "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/Sources/ClipboardManager/App.swift"
+          "name" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/Sources/ClipboardManager/App.swift"
         },
         {
           "kind" : "file",
-          "name" : "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+          "name" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
         },
         {
           "kind" : "file",
-          "name" : "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/debug/ClipboardManager.build/sources"
+          "name" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/debug/ClipboardManager.build/sources"
         }
       ],
       "isLibrary" : false,
       "moduleName" : "ClipboardManager",
-      "moduleOutputPath" : "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/debug/Modules/ClipboardManager.swiftmodule",
+      "moduleOutputPath" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/debug/Modules/ClipboardManager.swiftmodule",
       "objects" : [
-        "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/debug/ClipboardManager.build/App.swift.o"
+        "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/debug/ClipboardManager.build/App.swift.o"
       ],
       "otherArguments" : [
         "-target",
@@ -48,7 +48,7 @@
         "-enable-batch-mode",
         "-serialize-diagnostics",
         "-index-store-path",
-        "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/debug/index/store",
+        "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/debug/index/store",
         "-Onone",
         "-enable-testing",
         "-j8",
@@ -56,20 +56,21 @@
         "-DDEBUG",
         "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
         "-module-cache-path",
-        "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/debug/ModuleCache",
+        "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/debug/ModuleCache",
         "-parseable-output",
         "-Xfrontend",
         "-entry-point-function-name",
         "-Xfrontend",
         "ClipboardManager_main",
         "-parse-as-library",
+        "-color-diagnostics",
         "-swift-version",
         "5",
         "-suppress-warnings",
         "-plugin-path",
         "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
         "-sdk",
-        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.0.sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
         "-F",
         "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
         "-F",
@@ -82,7 +83,7 @@
         "-Xcc",
         "-isysroot",
         "-Xcc",
-        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.0.sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
         "-Xcc",
         "-F",
         "-Xcc",
@@ -96,24 +97,24 @@
         "-Xcc",
         "-g",
         "-package-name",
-        "clipboardmanager"
+        "copynoteapple"
       ],
-      "outputFileMapPath" : "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/debug/ClipboardManager.build/output-file-map.json",
+      "outputFileMapPath" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/debug/ClipboardManager.build/output-file-map.json",
       "outputs" : [
         {
           "kind" : "file",
-          "name" : "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/debug/ClipboardManager.build/App.swift.o"
+          "name" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/debug/ClipboardManager.build/App.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/debug/Modules/ClipboardManager.swiftmodule"
+          "name" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/debug/Modules/ClipboardManager.swiftmodule"
         }
       ],
       "prepareForIndexing" : false,
       "sources" : [
-        "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/Sources/ClipboardManager/App.swift"
+        "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/Sources/ClipboardManager/App.swift"
       ],
-      "tempsPath" : "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/debug/ClipboardManager.build",
+      "tempsPath" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/debug/ClipboardManager.build",
       "wholeModuleOptimization" : false
     }
   },
@@ -126,18 +127,18 @@
       "-module-name",
       "ClipboardManager",
       "-package-name",
-      "clipboardmanager",
+      "copynoteapple",
       "-c",
-      "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/Sources/ClipboardManager/App.swift",
+      "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/Sources/ClipboardManager/App.swift",
       "-I",
-      "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/debug/Modules",
+      "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/debug/Modules",
       "-target",
       "arm64-apple-macosx13.0",
       "-incremental",
       "-enable-batch-mode",
       "-serialize-diagnostics",
       "-index-store-path",
-      "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/debug/index/store",
+      "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/debug/index/store",
       "-Onone",
       "-enable-testing",
       "-j8",
@@ -145,20 +146,21 @@
       "-DDEBUG",
       "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
       "-module-cache-path",
-      "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/debug/ModuleCache",
+      "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/debug/ModuleCache",
       "-parseable-output",
       "-Xfrontend",
       "-entry-point-function-name",
       "-Xfrontend",
       "ClipboardManager_main",
       "-parse-as-library",
+      "-color-diagnostics",
       "-swift-version",
       "5",
       "-suppress-warnings",
       "-plugin-path",
       "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
       "-sdk",
-      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.0.sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
       "-F",
       "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
       "-F",
@@ -171,7 +173,7 @@
       "-Xcc",
       "-isysroot",
       "-Xcc",
-      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.0.sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
       "-Xcc",
       "-F",
       "-Xcc",
@@ -185,7 +187,7 @@
       "-Xcc",
       "-g",
       "-package-name",
-      "clipboardmanager",
+      "copynoteapple",
       "-driver-use-frontend-path",
       "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
     ]
@@ -207,7 +209,7 @@
     }
   },
   "writeCommands" : {
-    "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/debug/ClipboardManager-entitlement.plist" : {
+    "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/debug/ClipboardManager-entitlement.plist" : {
       "alwaysOutOfDate" : false,
       "inputs" : [
         {
@@ -219,9 +221,9 @@
           "name" : "<com.apple.security.get-task-allow>"
         }
       ],
-      "outputFilePath" : "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/debug/ClipboardManager-entitlement.plist"
+      "outputFilePath" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/debug/ClipboardManager-entitlement.plist"
     },
-    "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/debug/ClipboardManager.build/sources" : {
+    "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/debug/ClipboardManager.build/sources" : {
       "alwaysOutOfDate" : false,
       "inputs" : [
         {
@@ -230,12 +232,12 @@
         },
         {
           "kind" : "file",
-          "name" : "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/Sources/ClipboardManager/App.swift"
+          "name" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/Sources/ClipboardManager/App.swift"
         }
       ],
-      "outputFilePath" : "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/debug/ClipboardManager.build/sources"
+      "outputFilePath" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/debug/ClipboardManager.build/sources"
     },
-    "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/debug/ClipboardManager.product/Objects.LinkFileList" : {
+    "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/debug/ClipboardManager.product/Objects.LinkFileList" : {
       "alwaysOutOfDate" : false,
       "inputs" : [
         {
@@ -244,12 +246,12 @@
         },
         {
           "kind" : "file",
-          "name" : "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/debug/ClipboardManager.build/App.swift.o"
+          "name" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/debug/ClipboardManager.build/App.swift.o"
         }
       ],
-      "outputFilePath" : "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/debug/ClipboardManager.product/Objects.LinkFileList"
+      "outputFilePath" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/debug/ClipboardManager.product/Objects.LinkFileList"
     },
-    "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt" : {
+    "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt" : {
       "alwaysOutOfDate" : true,
       "inputs" : [
         {
@@ -261,7 +263,7 @@
           "name" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
         }
       ],
-      "outputFilePath" : "/Users/conordart/Documents/coding projects/apple notes app/ClipboardManager/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+      "outputFilePath" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
     }
   }
 }

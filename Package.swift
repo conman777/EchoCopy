@@ -2,19 +2,19 @@
 import PackageDescription
 
 let package = Package(
-    name: "ClipboardManager",
+    name: "Snaply",
     platforms: [
         .macOS(.v13)
     ],
     products: [
         .executable(
-            name: "ClipboardManager",
-            targets: ["ClipboardManager"]
+            name: "Snaply",
+            targets: ["Snaply"]
         )
     ],
     targets: [
         .executableTarget(
-            name: "ClipboardManager",
+            name: "Snaply",
             exclude: [
                 "Info.plist"
             ],

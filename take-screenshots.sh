@@ -1,5 +1,5 @@
 #!/bin/bash
-# Automated screenshot script for ClipboardManager
+# Automated screenshot script for Snaply
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -9,13 +9,13 @@ mkdir -p "$SCREENSHOTS_DIR"
 echo "🚀 Preparing to take new screenshots..."
 
 # Ensure the app is running
-open "$SCRIPT_DIR/dist/ClipboardManager.app"
+open "$SCRIPT_DIR/dist/Snaply.app"
 sleep 2
 
 # 1. Capture Main Window
 echo "📸 Capturing Main History Window..."
 # Bring to front
-osascript -e 'tell application "System Events" to tell process "ClipboardManager" to set frontmost to true'
+osascript -e 'tell application "System Events" to tell process "Snaply" to set frontmost to true'
 sleep 1
 # Capture the front window of the process
 WINDOW_ID=$(osascript -e 'tell edge to id of window 1' 2>/dev/null || echo "")
