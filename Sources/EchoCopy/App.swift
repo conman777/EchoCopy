@@ -2071,7 +2071,7 @@ class UpdateChecker: ObservableObject {
 
     // GitHub repo
     private let githubOwner = "conman777"
-    private let githubRepo = "copynoteapple"
+    private let githubRepo = "EchoCopy"
 
     private var currentVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.4"

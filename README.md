@@ -50,14 +50,14 @@ Never worry about being out of date. The app monitors for new releases and can d
 ## Installation
 
 ### Download
-Download the latest version from [GitHub Releases](https://github.com/conman777/copynoteapple/releases).
+Download the latest version from [GitHub Releases](https://github.com/conman777/EchoCopy/releases).
 
 ### Build from Source
 
 ```bash
 # Clone and build
-git clone https://github.com/conman777/copynoteapple.git
-cd copynoteapple
+git clone https://github.com/conman777/EchoCopy.git
+cd EchoCopy
 ./build-app.sh --open
 ```
 
