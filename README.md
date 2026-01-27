@@ -17,7 +17,7 @@
 Copy images or take screenshots and see them instantly. Unlike other managers that show generic icons, ClipboardManager provides large, clear previews so you know exactly what you're pasting.
 
 <p align="center">
-  <img src="screenshots/clipboard-history.png" alt="Clipboard History Previews" width="500">
+  <img src="screenshots/clipboard-history.png?v=1" alt="Clipboard History Previews" width="500">
 </p>
 
 ### ⚡ Quick HUD Picker (Option+V)
