@@ -1,14 +1,14 @@
 #!/bin/bash
 
-# Snaply Build and Run Script
+# EchoCopy Build and Run Script
 
-echo "🔨 Building Snaply..."
+echo "🔨 Building EchoCopy..."
 swift build -c release
 
 if [ $? -eq 0 ]; then
     echo "✅ Build successful!"
-    echo "🚀 Launching Snaply..."
-    ./.build/release/Snaply &
+    echo "🚀 Launching EchoCopy..."
+    ./.build/release/EchoCopy &
 else
     echo "❌ Build failed!"
     exit 1

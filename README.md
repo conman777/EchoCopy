@@ -1,7 +1,7 @@
-# Snaply
+# EchoCopy
 
 <p align="center">
-  <img src="https://img.icons8.com/fluency/200/clipboard.png" alt="Snaply Icon" width="128">
+  <img src="https://img.icons8.com/fluency/200/clipboard.png" alt="EchoCopy Icon" width="128">
   <br>
   A modern, high-performance clipboard manager for macOS that prioritizes speed and visual clarity.
 </p>
@@ -14,7 +14,7 @@
 ## Key Features
 
 ### 🖼️ High-Visibility Previews
-Copy images or take screenshots and see them instantly. Unlike other managers that show generic icons, Snaply provides large, clear previews so you know exactly what you're pasting.
+Copy images or take screenshots and see them instantly. Unlike other managers that show generic icons, EchoCopy provides large, clear previews so you know exactly what you're pasting.
 
 <p align="center">
   <img src="screenshots/preview-new.png" alt="Clipboard History Previews" width="500">

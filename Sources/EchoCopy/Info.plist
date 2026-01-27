@@ -5,13 +5,13 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleName</key>
-    <string>Snaply</string>
+    <string>EchoCopy</string>
     <key>CFBundleDisplayName</key>
-    <string>Snaply</string>
+    <string>EchoCopy</string>
     <key>CFBundleExecutable</key>
-    <string>Snaply</string>
+    <string>EchoCopy</string>
     <key>CFBundleIdentifier</key>
-    <string>com.yourcompany.snaply</string>
+    <string>com.yourcompany.echocopy</string>
     <key>CFBundleVersion</key>
     <string>5</string>
     <key>CFBundleShortVersionString</key>

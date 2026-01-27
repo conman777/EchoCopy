@@ -1,0 +1,13 @@
+{
+  "": {
+    "dependencies": "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/EchoCopy.build/EchoCopy.d",
+    "object": "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/EchoCopy.build/EchoCopy.o",
+    "swift-dependencies": "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/EchoCopy.build/master.swiftdeps"
+  },
+  "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/Sources/EchoCopy/App.swift": {
+    "object": "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/EchoCopy.build/App.swift.o",
+    "swiftmodule": "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/EchoCopy.build/App~partial.swiftmodule",
+    "swift-dependencies": "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/EchoCopy.build/App.swiftdeps",
+    "diagnostics": "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/EchoCopy.build/App.dia"
+  }
+}

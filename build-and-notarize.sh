@@ -6,7 +6,7 @@ echo "🏗️  Building Clipboard Manager for distribution..."
 # Configuration - UPDATE THESE WITH YOUR ACTUAL VALUES
 DEVELOPER_ID="Developer ID Application: Your Name (TEAM_ID)"
 BUNDLE_ID="com.yourcompany.clipboardmanager"
-APP_NAME="Snaply"
+APP_NAME="EchoCopy"
 VERSION="1.0.4"
 
 # Build paths
@@ -30,10 +30,10 @@ mkdir -p "${APP_BUNDLE}/Contents/MacOS"
 mkdir -p "${APP_BUNDLE}/Contents/Resources"
 
 # Copy executable
-cp "${BUILD_DIR}/Snaply" "${APP_BUNDLE}/Contents/MacOS/"
+cp "${BUILD_DIR}/EchoCopy" "${APP_BUNDLE}/Contents/MacOS/"
 
 # Copy Info.plist
-cp "Sources/Snaply/Info.plist" "${APP_BUNDLE}/Contents/"
+cp "Sources/EchoCopy/Info.plist" "${APP_BUNDLE}/Contents/"
 
 # Update Info.plist with actual values
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "${APP_BUNDLE}/Contents/Info.plist"
@@ -42,10 +42,10 @@ cp "Sources/Snaply/Info.plist" "${APP_BUNDLE}/Contents/"
 # Code sign with hardened runtime
 echo "✍️  Code signing..."
 codesign --force --options runtime \
-  --entitlements Snaply.entitlements \
+  --entitlements EchoCopy.entitlements \
   --sign "$DEVELOPER_ID" \
   --timestamp \
-  "${APP_BUNDLE}/Contents/MacOS/Snaply"
+  "${APP_BUNDLE}/Contents/MacOS/EchoCopy"
 
 codesign --force --options runtime \
   --sign "$DEVELOPER_ID" \

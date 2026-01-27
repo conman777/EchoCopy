@@ -764,7 +764,7 @@ class MenuBarManager: NSObject, NSMenuDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         if let button = statusItem?.button {
-            button.image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "Snaply")
+            button.image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "EchoCopy")
             button.target = self
             button.action = #selector(statusItemClicked)
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -822,7 +822,7 @@ class MenuBarManager: NSObject, NSMenuDelegate {
                 menu.addItem(NSMenuItem.separator())
             }
 
-            let openItem = NSMenuItem(title: "Open Snaply", action: #selector(MenuBarManager.openWindow), keyEquivalent: "")
+            let openItem = NSMenuItem(title: "Open EchoCopy", action: #selector(MenuBarManager.openWindow), keyEquivalent: "")
             openItem.target = strongSelf
             menu.addItem(openItem)
 
@@ -1338,7 +1338,7 @@ struct ContentView: View {
                 // Compact Header
                 VStack(spacing: 10) {
                     HStack(alignment: .center) {
-                        Text("Snaply")
+                        Text("EchoCopy")
                             .font(.system(size: 18, weight: .bold, design: .rounded))
                         
                         Spacer()
@@ -2024,7 +2024,7 @@ struct SettingsView: View {
                     .font(.system(size: 12))
                 } else if let currentApp = NSWorkspace.shared.frontmostApplication,
                           currentApp.bundleIdentifier == Bundle.main.bundleIdentifier {
-                    Text("Cannot exclude Snaply itself")
+                    Text("Cannot exclude EchoCopy itself")
                         .font(.system(size: 11))
                         .foregroundColor(.orange)
                 }
@@ -2094,7 +2094,7 @@ class UpdateChecker: ObservableObject {
 
         var request = URLRequest(url: url)
         request.setValue("application/vnd.github.v3+json", forHTTPHeaderField: "Accept")
-        request.setValue("Snaply/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        request.setValue("EchoCopy/\(currentVersion)", forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 10
 
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
@@ -2159,7 +2159,7 @@ class UpdateChecker: ObservableObject {
         downloadProgress = 0
         errorMessage = nil
         
-        let destinationURL = FileManager.default.temporaryDirectory.appendingPathComponent("SnaplyUpdate.zip")
+        let destinationURL = FileManager.default.temporaryDirectory.appendingPathComponent("EchoCopyUpdate.zip")
         
         // Remove old update file if exists
         try? FileManager.default.removeItem(at: destinationURL)
@@ -2192,7 +2192,7 @@ class UpdateChecker: ObservableObject {
     }
 
     private func installUpdate(from zipURL: URL) {
-        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("SnaplyExtract")
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("EchoCopyExtract")
         try? FileManager.default.removeItem(at: tempDir)
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         
@@ -2260,7 +2260,7 @@ class UpdateChecker: ObservableObject {
 // MARK: - App
 
 @main
-struct SnaplyApp: App {
+struct EchoCopyApp: App {
     @StateObject private var history: ClipboardHistory
     private let clipboardMonitor: ClipboardMonitor
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate

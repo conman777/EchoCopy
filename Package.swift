@@ -2,19 +2,19 @@
 import PackageDescription
 
 let package = Package(
-    name: "Snaply",
+    name: "EchoCopy",
     platforms: [
         .macOS(.v13)
-    ],
+  ],
     products: [
         .executable(
-            name: "Snaply",
-            targets: ["Snaply"]
+            name: "EchoCopy",
+            targets: ["EchoCopy"]
         )
     ],
     targets: [
         .executableTarget(
-            name: "Snaply",
+            name: "EchoCopy",
             exclude: [
                 "Info.plist"
             ],

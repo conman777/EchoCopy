@@ -17,14 +17,14 @@
 
   ],
   "swiftCommands" : {
-    "C.Snaply-arm64-apple-macosx26.0-release.module" : {
+    "C.EchoCopy-arm64-apple-macosx26.0-release.module" : {
       "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
-      "fileList" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/Snaply.build/sources",
+      "fileList" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/EchoCopy.build/sources",
       "importPath" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/Modules",
       "inputs" : [
         {
           "kind" : "file",
-          "name" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/Sources/Snaply/App.swift"
+          "name" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/Sources/EchoCopy/App.swift"
         },
         {
           "kind" : "file",
@@ -32,14 +32,14 @@
         },
         {
           "kind" : "file",
-          "name" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/Snaply.build/sources"
+          "name" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/EchoCopy.build/sources"
         }
       ],
       "isLibrary" : false,
-      "moduleName" : "Snaply",
-      "moduleOutputPath" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/Modules/Snaply.swiftmodule",
+      "moduleName" : "EchoCopy",
+      "moduleOutputPath" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/Modules/EchoCopy.swiftmodule",
       "objects" : [
-        "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/Snaply.build/App.swift.o"
+        "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/EchoCopy.build/App.swift.o"
       ],
       "otherArguments" : [
         "-target",
@@ -58,7 +58,7 @@
         "-Xfrontend",
         "-entry-point-function-name",
         "-Xfrontend",
-        "Snaply_main",
+        "EchoCopy_main",
         "-parse-as-library",
         "-color-diagnostics",
         "-swift-version",
@@ -95,22 +95,22 @@
         "-package-name",
         "copynoteapple"
       ],
-      "outputFileMapPath" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/Snaply.build/output-file-map.json",
+      "outputFileMapPath" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/EchoCopy.build/output-file-map.json",
       "outputs" : [
         {
           "kind" : "file",
-          "name" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/Snaply.build/App.swift.o"
+          "name" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/EchoCopy.build/App.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/Modules/Snaply.swiftmodule"
+          "name" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/Modules/EchoCopy.swiftmodule"
         }
       ],
       "prepareForIndexing" : false,
       "sources" : [
-        "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/Sources/Snaply/App.swift"
+        "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/Sources/EchoCopy/App.swift"
       ],
-      "tempsPath" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/Snaply.build",
+      "tempsPath" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/EchoCopy.build",
       "wholeModuleOptimization" : true
     }
   },
@@ -118,14 +118,14 @@
 
   },
   "swiftTargetScanArgs" : {
-    "Snaply" : [
+    "EchoCopy" : [
       "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
       "-module-name",
-      "Snaply",
+      "EchoCopy",
       "-package-name",
       "copynoteapple",
       "-c",
-      "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/Sources/Snaply/App.swift",
+      "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/Sources/EchoCopy/App.swift",
       "-I",
       "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/Modules",
       "-target",
@@ -144,7 +144,7 @@
       "-Xfrontend",
       "-entry-point-function-name",
       "-Xfrontend",
-      "Snaply_main",
+      "EchoCopy_main",
       "-parse-as-library",
       "-color-diagnostics",
       "-swift-version",
@@ -185,7 +185,7 @@
     ]
   },
   "targetDependencyMap" : {
-    "Snaply" : [
+    "EchoCopy" : [
 
     ]
   },
@@ -201,7 +201,7 @@
     }
   },
   "writeCommands" : {
-    "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/Snaply.build/sources" : {
+    "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/EchoCopy.build/sources" : {
       "alwaysOutOfDate" : false,
       "inputs" : [
         {
@@ -210,12 +210,12 @@
         },
         {
           "kind" : "file",
-          "name" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/Sources/Snaply/App.swift"
+          "name" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/Sources/EchoCopy/App.swift"
         }
       ],
-      "outputFilePath" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/Snaply.build/sources"
+      "outputFilePath" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/EchoCopy.build/sources"
     },
-    "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/Snaply.product/Objects.LinkFileList" : {
+    "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/EchoCopy.product/Objects.LinkFileList" : {
       "alwaysOutOfDate" : false,
       "inputs" : [
         {
@@ -224,10 +224,10 @@
         },
         {
           "kind" : "file",
-          "name" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/Snaply.build/App.swift.o"
+          "name" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/EchoCopy.build/App.swift.o"
         }
       ],
-      "outputFilePath" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/Snaply.product/Objects.LinkFileList"
+      "outputFilePath" : "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/EchoCopy.product/Objects.LinkFileList"
     },
     "/Users/conordart/Documents/coding projects/apple notes app/copynoteapple/.build/arm64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt" : {
       "alwaysOutOfDate" : true,

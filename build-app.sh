@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Build a proper macOS app bundle
 
-APP_NAME="Snaply"
+APP_NAME="EchoCopy"
 BUILD_DIR=".build/release"
 DIST_DIR="dist"
 APP_BUNDLE="${DIST_DIR}/${APP_NAME}.app"
@@ -28,7 +28,7 @@ mkdir -p "${CONTENTS_DIR}/Resources"
 cp "${BUILD_DIR}/${APP_NAME}" "${MACOS_DIR}/${APP_NAME}"
 
 # Copy Info.plist (used when the bundle is launched via Finder)
-cp "Sources/Snaply/Info.plist" "${CONTENTS_DIR}/Info.plist"
+cp "Sources/EchoCopy/Info.plist" "${CONTENTS_DIR}/Info.plist"
 
 # Optional overrides
 if [[ -n "${BUNDLE_ID:-}" ]]; then
