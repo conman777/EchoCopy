@@ -1,6 +1,10 @@
 # ClipboardManager
 
-A modern, high-performance clipboard manager for macOS that prioritizes speed and visual clarity.
+<p align="center">
+  <img src="https://img.icons8.com/fluency/200/clipboard.png" alt="ClipboardManager Icon" width="128">
+  <br>
+  A modern, high-performance clipboard manager for macOS that prioritizes speed and visual clarity.
+</p>
 
 ![macOS](https://img.shields.io/badge/macOS-13.0+-blue)
 ![Swift](https://img.shields.io/badge/Swift-5.9+-orange)
