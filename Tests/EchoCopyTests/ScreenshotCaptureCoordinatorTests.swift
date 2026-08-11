@@ -21,7 +21,7 @@ final class ScreenshotCaptureCoordinatorTests: XCTestCase {
                 flags: commandShift
             )
         )
-        XCTAssertTrue(
+        XCTAssertFalse(
             ScreenshotShortcutPolicy.isStandardScreenshotShortcut(
                 keyCode: CGKeyCode(kVK_ANSI_6),
                 flags: commandShift
@@ -72,6 +72,73 @@ final class ScreenshotCaptureCoordinatorTests: XCTestCase {
         XCTAssertTrue(replacement.shortcutDown.flags.contains(.maskControl))
         XCTAssertTrue(replacement.shortcutUp.flags.contains(.maskControl))
         XCTAssertFalse(replacement.controlUp.flags.contains(.maskControl))
+    }
+
+    func testClipboardScreenshotShortcutMustBeValidBeforeInterception() {
+        let validHotKeys: [String: Any] = [
+            "31": symbolicHotKeyEntry(
+                characterCode: 52,
+                keyCode: kVK_ANSI_4,
+                modifiers: 1_441_792
+            )
+        ]
+
+        XCTAssertTrue(
+            ScreenshotClipboardShortcutConfiguration.isEnabled(
+                for: CGKeyCode(kVK_ANSI_4),
+                symbolicHotKeys: validHotKeys
+            )
+        )
+
+        var malformedEntry = symbolicHotKeyEntry(
+            characterCode: 52,
+            keyCode: kVK_ANSI_4,
+            modifiers: 1_441_792
+        )
+        var malformedValue = malformedEntry["value"] as! [String: Any]
+        malformedValue["parameters"] = [52, kVK_ANSI_4, 1_441_792, 1_179_648]
+        malformedEntry["value"] = malformedValue
+
+        XCTAssertFalse(
+            ScreenshotClipboardShortcutConfiguration.isEnabled(
+                for: CGKeyCode(kVK_ANSI_4),
+                symbolicHotKeys: ["31": malformedEntry]
+            )
+        )
+    }
+
+    func testClipboardScreenshotShortcutFailsOpenForUnsafeConfigurations() {
+        var disabledEntry = symbolicHotKeyEntry(
+            characterCode: 52,
+            keyCode: kVK_ANSI_4,
+            modifiers: 1_441_792
+        )
+        disabledEntry["enabled"] = false
+
+        XCTAssertFalse(
+            ScreenshotClipboardShortcutConfiguration.isEnabled(
+                for: CGKeyCode(kVK_ANSI_4),
+                symbolicHotKeys: ["31": disabledEntry]
+            )
+        )
+        XCTAssertFalse(
+            ScreenshotClipboardShortcutConfiguration.isEnabled(
+                for: CGKeyCode(kVK_ANSI_4),
+                symbolicHotKeys: [
+                    "31": symbolicHotKeyEntry(
+                        characterCode: 52,
+                        keyCode: kVK_ANSI_4,
+                        modifiers: 1_179_648
+                    )
+                ]
+            )
+        )
+        XCTAssertFalse(
+            ScreenshotClipboardShortcutConfiguration.isEnabled(
+                for: CGKeyCode(kVK_ANSI_6),
+                symbolicHotKeys: [:]
+            )
+        )
     }
 
     func testPendingScreenshotIsConsumedExactlyOnce() throws {
@@ -239,5 +306,19 @@ final class ScreenshotCaptureCoordinatorTests: XCTestCase {
             defaults.removePersistentDomain(forName: suiteName)
         }
         return defaults
+    }
+
+    private func symbolicHotKeyEntry(
+        characterCode: Int,
+        keyCode: Int,
+        modifiers: Int
+    ) -> [String: Any] {
+        [
+            "enabled": true,
+            "value": [
+                "parameters": [characterCode, keyCode, modifiers],
+                "type": "standard"
+            ]
+        ]
     }
 }

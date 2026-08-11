@@ -25,13 +25,76 @@ enum ScreenshotShortcutPolicy {
             return false
         }
 
-        // Shift-Command-3 captures the displays, Shift-Command-4 starts an
-        // interactive selection/window capture, and Shift-Command-6 captures
-        // the Touch Bar on Macs that provide one. Shift-Command-5 opens the
-        // Screenshot app rather than completing a capture, so it is left alone.
-        return [kVK_ANSI_3, kVK_ANSI_4, kVK_ANSI_6]
+        // Shift-Command-3 captures the displays and Shift-Command-4 starts an
+        // interactive selection/window capture. Other screenshot shortcuts do
+        // not expose a stable clipboard variant, so EchoCopy leaves them alone.
+        return [kVK_ANSI_3, kVK_ANSI_4]
             .map(CGKeyCode.init)
             .contains(keyCode)
+    }
+}
+
+/// Validates the macOS clipboard variants before EchoCopy replaces a standard
+/// screenshot shortcut. If the system shortcut is disabled, customized, or
+/// malformed, EchoCopy must leave the original key event untouched.
+enum ScreenshotClipboardShortcutConfiguration {
+    private static let preferencesDomain = "com.apple.symbolichotkeys" as CFString
+    private static let preferencesKey = "AppleSymbolicHotKeys" as CFString
+
+    static func isEnabled(for keyCode: CGKeyCode) -> Bool {
+        isEnabled(
+            for: keyCode,
+            symbolicHotKeys: CFPreferencesCopyAppValue(
+                preferencesKey,
+                preferencesDomain
+            )
+        )
+    }
+
+    static func isEnabled(
+        for keyCode: CGKeyCode,
+        symbolicHotKeys: Any?
+    ) -> Bool {
+        guard let expected = expectedConfiguration(for: keyCode),
+              let hotKeys = symbolicHotKeys as? [String: Any],
+              let entry = hotKeys[expected.identifier] as? [String: Any],
+              let enabled = entry["enabled"] as? NSNumber,
+              enabled.boolValue,
+              let value = entry["value"] as? [String: Any],
+              (value["type"] as? String) == "standard",
+              let parameters = value["parameters"] as? [NSNumber],
+              parameters.count == 3 else {
+            return false
+        }
+
+        return parameters[0].intValue == expected.characterCode
+            && parameters[1].intValue == Int(keyCode)
+            && parameters[2].uint64Value == expected.modifiers
+    }
+
+    private static func expectedConfiguration(
+        for keyCode: CGKeyCode
+    ) -> (identifier: String, characterCode: Int, modifiers: UInt64)? {
+        let identifier: String
+        let characterCode: Int
+
+        switch Int(keyCode) {
+        case kVK_ANSI_3:
+            identifier = "29"
+            characterCode = 51
+        case kVK_ANSI_4:
+            identifier = "31"
+            characterCode = 52
+        default:
+            // macOS does not expose a stable symbolic-hotkey entry for the
+            // Touch Bar capture variant. Preserve it instead of guessing.
+            return nil
+        }
+
+        let modifiers = CGEventFlags.maskCommand.rawValue
+            | CGEventFlags.maskShift.rawValue
+            | CGEventFlags.maskControl.rawValue
+        return (identifier, characterCode, modifiers)
     }
 }
 

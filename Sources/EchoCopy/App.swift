@@ -1369,10 +1369,22 @@ class GlobalShortcutHandler {
            ScreenshotShortcutPolicy.isStandardScreenshotShortcut(
                keyCode: keyCode,
                flags: flags
-           ),
-           screenshotCoordinator.beginAutomaticClipboardCapture(
-               startingPasteboardChangeCount: NSPasteboard.general.changeCount
            ) {
+            guard ScreenshotClipboardShortcutConfiguration.isEnabled(
+                for: keyCode
+            ) else {
+                Self.logger.error(
+                    "Clipboard screenshot shortcut is unavailable for key code \(keyCode, privacy: .public); preserving the original event"
+                )
+                return Unmanaged.passUnretained(event)
+            }
+
+            guard screenshotCoordinator.beginAutomaticClipboardCapture(
+                startingPasteboardChangeCount: NSPasteboard.general.changeCount
+            ) else {
+                return Unmanaged.passUnretained(event)
+            }
+
             guard let replacement =
                     ScreenshotShortcutRemapper.makeClipboardShortcutReplacement(
                         keyCode: keyCode,
@@ -2509,8 +2521,8 @@ struct SettingsView: View {
                         )
 
                         Text(
-                            "Standard Shift-Command-3, Shift-Command-4, and "
-                            + "Shift-Command-6 captures remain saved in your "
+                            "Standard Shift-Command-3 and Shift-Command-4 "
+                            + "captures remain saved in your "
                             + "Screenshot location and are also added to the clipboard."
                         )
                         .font(.system(size: 11))
