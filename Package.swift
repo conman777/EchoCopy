@@ -21,6 +21,10 @@ let package = Package(
             swiftSettings: [
                 .unsafeFlags(["-suppress-warnings"], .when(configuration: .debug)),
             ]
+        ),
+        .testTarget(
+            name: "EchoCopyTests",
+            dependencies: ["EchoCopy"]
         )
     ]
 )

@@ -1,28 +1,42 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-echo "🏗️  Building Clipboard Manager for distribution..."
+echo "🏗️  Building EchoCopy for distribution..."
 
-# Configuration - UPDATE THESE WITH YOUR ACTUAL VALUES
-DEVELOPER_ID="Developer ID Application: Your Name (TEAM_ID)"
-BUNDLE_ID="com.yourcompany.clipboardmanager"
+# Configuration can be provided through the environment. Keep the existing
+# bundle identifier for upgrades so preferences and macOS permissions carry over.
+DEVELOPER_ID="${DEVELOPER_ID:-}"
+BUNDLE_ID="${BUNDLE_ID:-com.yourcompany.echocopy}"
 APP_NAME="EchoCopy"
-VERSION="1.0.4"
+VERSION="${VERSION:-1.0.4}"
 
-# Build paths
-BUILD_DIR=".build/release"
 APP_BUNDLE="${APP_NAME}.app"
 DMG_NAME="${APP_NAME}-${VERSION}.dmg"
 
+if [[ -z "$DEVELOPER_ID" || "$DEVELOPER_ID" == *"Your Name"* || "$DEVELOPER_ID" == *"TEAM_ID"* ]]; then
+  echo "Set DEVELOPER_ID to an installed Developer ID Application certificate before creating a release." >&2
+  exit 1
+fi
+
+if [[ "$BUNDLE_ID" != *.* ]]; then
+  echo "BUNDLE_ID must be a stable reverse-DNS identifier." >&2
+  exit 1
+fi
+
+if [[ "$BUNDLE_ID" != "com.yourcompany.echocopy" ]]; then
+  echo "Warning: changing the existing bundle identifier creates a new macOS permission and preferences identity." >&2
+fi
+
 # Clean previous builds
 echo "🧹 Cleaning previous builds..."
-rm -rf "$BUILD_DIR"
 rm -rf "$APP_BUNDLE"
 rm -f "$DMG_NAME"
+swift package clean
 
 # Build with Swift Package Manager
 echo "🔨 Building with SPM..."
 swift build -c release --arch arm64 --arch x86_64
+BUILD_DIR="$(swift build --show-bin-path -c release --arch arm64 --arch x86_64)"
 
 # Create app bundle structure
 echo "📦 Creating app bundle..."
@@ -35,9 +49,10 @@ cp "${BUILD_DIR}/EchoCopy" "${APP_BUNDLE}/Contents/MacOS/"
 # Copy Info.plist
 cp "Sources/EchoCopy/Info.plist" "${APP_BUNDLE}/Contents/"
 
-# Update Info.plist with actual values
+# Update Info.plist with release values
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "${APP_BUNDLE}/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "${APP_BUNDLE}/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "${APP_BUNDLE}/Contents/Info.plist"
 
 # Code sign with hardened runtime
 echo "✍️  Code signing..."

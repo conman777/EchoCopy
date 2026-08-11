@@ -4,15 +4,64 @@ set -euo pipefail
 # Build a proper macOS app bundle
 
 APP_NAME="EchoCopy"
-BUILD_DIR=".build/release"
-DIST_DIR="dist"
+DIST_DIR="${DIST_DIR:-dist}"
 APP_BUNDLE="${DIST_DIR}/${APP_NAME}.app"
 CONTENTS_DIR="${APP_BUNDLE}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 ZIP_PATH="${DIST_DIR}/${APP_NAME}.app.zip"
+BUNDLE_ID="${BUNDLE_ID:-com.yourcompany.echocopy}"
+
+find_default_signing_identity() {
+  local identities prefix candidate
+
+  identities="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+
+  # Prefer a development identity for local builds, then a Developer ID
+  # identity. Fall back to any other valid code-signing identity.
+  for prefix in "Apple Development:" "Developer ID Application:" "Mac Developer:"; do
+    candidate="$(awk -F '"' -v prefix="${prefix}" \
+      'index($2, prefix) == 1 { print $2; exit }' <<< "${identities}")"
+    if [[ -n "${candidate}" ]]; then
+      printf '%s' "${candidate}"
+      return
+    fi
+  done
+
+  awk -F '"' \
+    '$1 ~ /^[[:space:]]*[0-9]+\)/ && NF >= 3 { print $2; exit }' \
+    <<< "${identities}"
+}
+
+SIGNING_IDENTITY="${SIGNING_IDENTITY:-}"
+if [[ -z "${SIGNING_IDENTITY}" ]]; then
+  SIGNING_IDENTITY="$(find_default_signing_identity)"
+fi
+
+if [[ -z "${SIGNING_IDENTITY}" ]]; then
+  echo "❌ No usable code-signing identity was found. Refusing to create an ad-hoc build that loses macOS permission continuity." >&2
+  echo "   Install/unlock your certificate, or explicitly request a disposable build with SIGNING_IDENTITY=- ./build-app.sh" >&2
+  exit 1
+fi
+
+# Never silently replace an already-authorized app with a different signing
+# identity. macOS Accessibility and Keychain grants are bound to the signed
+# identity, so doing that would make permissions appear to reset again.
+if [[ -d "${APP_BUNDLE}" ]]; then
+  previous_signing_identity="$(codesign -d -r- "${APP_BUNDLE}" 2>&1 \
+    | sed -n 's/.*certificate leaf\[subject.CN\] = "\(.*\)".*/\1/p' \
+    | head -n 1)"
+  if [[ -n "${previous_signing_identity}" && "${previous_signing_identity}" != "${SIGNING_IDENTITY}" ]]; then
+    echo "❌ Refusing to change EchoCopy's signing identity." >&2
+    echo "   Existing: ${previous_signing_identity}" >&2
+    echo "   Selected: ${SIGNING_IDENTITY}" >&2
+    echo "   Set SIGNING_IDENTITY explicitly only when you intend a one-time macOS permission migration." >&2
+    exit 1
+  fi
+fi
 
 echo "🔨 Building ${APP_NAME} (release)..."
 swift build -c release
+BUILD_DIR="$(swift build --show-bin-path -c release)"
 
 echo "📦 Creating app bundle..."
 
@@ -31,13 +80,21 @@ cp "${BUILD_DIR}/${APP_NAME}" "${MACOS_DIR}/${APP_NAME}"
 cp "Sources/EchoCopy/Info.plist" "${CONTENTS_DIR}/Info.plist"
 
 # Optional overrides
-if [[ -n "${BUNDLE_ID:-}" ]]; then
-  /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${BUNDLE_ID}" "${CONTENTS_DIR}/Info.plist"
-fi
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${BUNDLE_ID}" "${CONTENTS_DIR}/Info.plist"
 
 if [[ -n "${VERSION:-}" ]]; then
   /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "${CONTENTS_DIR}/Info.plist" || true
   /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION}" "${CONTENTS_DIR}/Info.plist" || true
+fi
+
+# Re-sign the assembled local bundle. SwiftPM signs the standalone executable,
+# but that signature is no longer valid after it is placed inside an app bundle.
+echo "🔏 Signing with: ${SIGNING_IDENTITY}"
+codesign --force --deep --sign "${SIGNING_IDENTITY}" "${APP_BUNDLE}"
+codesign --verify --deep --strict "${APP_BUNDLE}"
+
+if [[ "${SIGNING_IDENTITY}" == "-" ]]; then
+  echo "ℹ️  This ad-hoc development signature changes after rebuilds; macOS may require manual permission reauthorization."
 fi
 
 # Create a portable zip for easy install/sharing

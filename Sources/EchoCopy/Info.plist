@@ -29,6 +29,6 @@
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
     <key>NSAccessibilityUsageDescription</key>
-    <string>Clipboard Manager needs accessibility access to capture keyboard shortcuts (Option+V) globally.</string>
+    <string>EchoCopy needs accessibility access to capture its global Control+V and Command+Shift+V shortcuts.</string>
 </dict>
 </plist>

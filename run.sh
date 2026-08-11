@@ -1,15 +1,8 @@
 #!/bin/bash
+set -euo pipefail
 
-# EchoCopy Build and Run Script
-
-echo "🔨 Building EchoCopy..."
-swift build -c release
-
-if [ $? -eq 0 ]; then
-    echo "✅ Build successful!"
-    echo "🚀 Launching EchoCopy..."
-    ./.build/release/EchoCopy &
-else
-    echo "❌ Build failed!"
-    exit 1
-fi
+# Always launch the signed app bundle. Running .build/release/EchoCopy directly
+# creates a new ad-hoc/SwiftPM identity and makes macOS Accessibility and
+# Keychain permissions appear to reset on every rebuild.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+exec "${SCRIPT_DIR}/build-app.sh" --open

@@ -5,17 +5,19 @@ import Combine
 import Observation
 import ApplicationServices
 import Carbon.HIToolbox
+import ImageIO
+import OSLog
 
 // MARK: - Data Models
 
-enum ContentType: String, Codable {
+enum ContentType: String, Codable, Sendable {
     case text
     case image
     case file
     case url
 }
 
-struct ClipboardItem: Codable, Identifiable {
+struct ClipboardItem: Codable, Identifiable, Sendable {
     let id: UUID
     let content: String  // Plain text, URL, or base64 for images
     let contentType: ContentType
@@ -76,26 +78,87 @@ struct ClipboardItem: Codable, Identifiable {
 class ClipboardHistory: ObservableObject {
     @Published var items: [ClipboardItem] = []
     @Published var excludedApps: Set<String> = []
+    @Published private(set) var persistenceError: String?
+    @Published private(set) var canRetryHistoryUnlock = false
+    var isPersistenceBlocked: Bool { persistenceBlocked }
     private let maxItems = 500
-    private let storageKey = "clipboardHistory"
     private let excludedAppsKey = "excludedApps"
+    private let defaultExclusionsVersionKey = "defaultExclusionsVersion"
+    private let defaultExclusionsVersion = 1
+    private let keychainRepairMessage = "EchoCopy needs a one-time Keychain repair. Choose Repair Secure History."
+    private let historyStore: EncryptedHistoryStore
+    private let persistenceCoordinator: HistoryPersistenceCoordinator
+    private var persistenceGeneration = 0
+    private var persistenceBlocked = false
+    private let defaultExcludedApps: Set<String> = [
+        "com.1password.1password",           // 1Password
+        "com.agilebits.onepassword7",        // 1Password 7
+        "com.lastpass.LastPass",             // LastPass
+        "com.bitwarden.desktop",             // Bitwarden
+        "com.dashlane.Dashlane",             // Dashlane
+        "com.keeper.KeeperPasswordManager",  // Keeper
+        "com.nordpass.NordPass",             // NordPass
+        "com.apple.keychainaccess",          // Keychain Access
+        "com.apple.Passwords",               // Passwords (macOS 14+)
+        "com.apple.passwords"                // Passwords (alternate identifier)
+    ]
 
-    init() {
+    init(historyStore: EncryptedHistoryStore = .live()) {
+        self.historyStore = historyStore
+        self.persistenceCoordinator = HistoryPersistenceCoordinator(historyStore: historyStore)
         loadHistory()
         loadExcludedApps()
     }
 
     func addItem(_ content: String, contentType: ContentType = .text, filename: String? = nil, rtfContent: String? = nil) {
-        // Compare against the most recent *unpinned* item (pinned items are kept at the top).
-        if let lastItem = items.first(where: { !$0.isPinned }),
-           lastItem.content == content,
-           lastItem.contentType == contentType,
-           lastItem.filename == filename,
-           lastItem.rtfContent == rtfContent {
+        guard ClipboardPolicy.acceptsStoredItem(
+            content: content,
+            contentType: contentType,
+            rtfContent: rtfContent,
+            filename: filename
+        ) else {
             return
         }
 
-        let newItem = ClipboardItem(content: content, contentType: contentType, filename: filename, rtfContent: rtfContent)
+        insertItem(
+            ClipboardItem(
+                content: content,
+                contentType: contentType,
+                filename: filename,
+                rtfContent: rtfContent
+            )
+        )
+    }
+
+    /// Inserts a payload that was already validated on the clipboard processing
+    /// queue. This avoids decoding large base64 image/RTF values again on MainActor.
+    func addPreparedItem(
+        _ content: String,
+        contentType: ContentType,
+        filename: String? = nil,
+        rtfContent: String? = nil
+    ) {
+        insertItem(
+            ClipboardItem(
+                content: content,
+                contentType: contentType,
+                filename: filename,
+                rtfContent: rtfContent
+            )
+        )
+    }
+
+    private func insertItem(_ newItem: ClipboardItem) {
+
+        // Compare against the most recent *unpinned* item (pinned items are kept at the top).
+        if let lastItem = items.first(where: { !$0.isPinned }),
+           lastItem.content == newItem.content,
+           lastItem.contentType == newItem.contentType,
+           lastItem.filename == newItem.filename,
+           lastItem.rtfContent == newItem.rtfContent {
+            return
+        }
+
         // Keep pinned items at the top; insert new history items just below pinned.
         let insertionIndex = items.firstIndex(where: { !$0.isPinned }) ?? items.count
         items.insert(newItem, at: insertionIndex)
@@ -111,19 +174,19 @@ class ClipboardHistory: ObservableObject {
             }
         }
 
-        saveHistory()
+        scheduleHistorySave()
     }
 
     func removeItem(at index: Int) {
         guard index >= 0 && index < items.count else { return }
         items.remove(at: index)
-        saveHistory()
+        scheduleHistorySave()
     }
 
     func removeItem(id: UUID) {
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
         items.remove(at: index)
-        saveHistory()
+        scheduleHistorySave()
     }
 
     func togglePin(for item: ClipboardItem) {
@@ -149,17 +212,17 @@ class ClipboardHistory: ObservableObject {
             items.insert(updated, at: insertionIndex)
         }
 
-        saveHistory()
+        scheduleHistorySave()
     }
 
     func clearHistory() {
         items.removeAll()
-        saveHistory()
+        scheduleHistorySave()
     }
 
     func clearUnpinnedHistory() {
         items.removeAll(where: { !$0.isPinned })
-        saveHistory()
+        scheduleHistorySave()
     }
 
     private func insertionIndexForUnpinnedItem(with timestamp: Date) -> Int {
@@ -174,34 +237,160 @@ class ClipboardHistory: ObservableObject {
         return items.count
     }
 
-    private func saveHistory() {
-        if let encoded = try? JSONEncoder().encode(items) {
-            UserDefaults.standard.set(encoded, forKey: storageKey)
+    private func scheduleHistorySave() {
+        guard !persistenceBlocked else {
+            canRetryHistoryUnlock = true
+            persistenceError = keychainRepairMessage
+            return
+        }
+
+        persistenceGeneration &+= 1
+        let generation = persistenceGeneration
+
+        persistenceCoordinator.scheduleSave(items, generation: generation) { [weak self] completedGeneration, result in
+            Task { @MainActor [weak self] in
+                self?.handlePersistenceResult(
+                    generation: completedGeneration,
+                    result: result
+                )
+            }
         }
     }
 
+    private func handlePersistenceResult(
+        generation: Int,
+        result: Result<[ClipboardItem], Error>
+    ) {
+        guard generation == persistenceGeneration else { return }
+
+        switch result {
+        case .success(let persistedItems):
+            if persistedItems.map(\.id) != items.map(\.id) {
+                items = persistedItems
+            }
+            persistenceBlocked = false
+            canRetryHistoryUnlock = false
+            persistenceError = nil
+        case .failure(let error):
+            let requiresUnlock = (error as? EncryptedHistoryStoreError)?.requiresKeychainUnlock ?? false
+            if requiresUnlock {
+                historyStore.recordKeychainRepairRequired()
+            }
+            persistenceBlocked = requiresUnlock
+            canRetryHistoryUnlock = requiresUnlock
+            persistenceError = requiresUnlock
+                ? keychainRepairMessage
+                : "Clipboard history could not be saved securely."
+        }
+    }
+
+    func flushPersistence() {
+        guard !persistenceBlocked else { return }
+
+        persistenceGeneration &+= 1
+        let generation = persistenceGeneration
+        let result = persistenceCoordinator.flushSave(items)
+        handlePersistenceResult(generation: generation, result: result)
+    }
+
     private func loadHistory() {
-        if let data = UserDefaults.standard.data(forKey: storageKey),
-           let decoded = try? JSONDecoder().decode([ClipboardItem].self, from: data) {
-            items = decoded
+        if historyStore.requiresUserInitiatedKeychainRepair {
+            // Preserve the unreadable encrypted payload for optional manual
+            // recovery, then start clean. Normal startup must never touch a
+            // legacy Keychain item or block new clipboard history.
+            historyStore.archiveLegacyHistoryAndStartFresh()
+        }
+
+        loadHistory(
+            allowKeychainInteraction: false,
+            preserveItemsOnFailure: false
+        )
+    }
+
+    /// Retries the protected history read only after the user explicitly asks
+    /// EchoCopy to unlock its Keychain item. This keeps startup silent while
+    /// ensuring any authentication prompt names EchoCopy, not a helper tool.
+    func retryHistoryUnlock() {
+        guard canRetryHistoryUnlock else { return }
+
+        persistenceBlocked = false
+        loadHistory(
+            allowKeychainInteraction: true,
+            preserveItemsOnFailure: true
+        )
+    }
+
+    private func loadHistory(
+        allowKeychainInteraction: Bool,
+        preserveItemsOnFailure: Bool
+    ) {
+        do {
+            guard let decoded = try historyStore.load(
+                maximumPlaintextBytes: ClipboardPolicy.maxHistoryBytes,
+                allowKeychainInteraction: allowKeychainInteraction
+            ) else {
+                persistenceBlocked = false
+                canRetryHistoryUnlock = false
+                persistenceError = nil
+                return
+            }
+
+            let sanitizedItems = decoded.filter {
+                ClipboardPolicy.acceptsStoredItem(
+                    content: $0.content,
+                    contentType: $0.contentType,
+                    rtfContent: $0.rtfContent,
+                    filename: $0.filename
+                )
+            }
+            let itemCountBeforeBudget = sanitizedItems.count
+            items = sanitizedItems
+            enforceItemCountLimit()
+            if items.count != decoded.count || items.count != itemCountBeforeBudget {
+                scheduleHistorySave()
+            }
+            persistenceBlocked = false
+            canRetryHistoryUnlock = false
+            persistenceError = nil
+        } catch {
+            if !preserveItemsOnFailure {
+                items = []
+            }
+            let requiresUnlock = (error as? EncryptedHistoryStoreError)?.requiresKeychainUnlock ?? false
+            if requiresUnlock {
+                historyStore.recordKeychainRepairRequired()
+            }
+            persistenceBlocked = requiresUnlock
+            canRetryHistoryUnlock = requiresUnlock
+            persistenceError = requiresUnlock
+                ? keychainRepairMessage
+                : "Secure clipboard history could not be opened. EchoCopy will not overwrite it."
+        }
+    }
+
+    private func enforceItemCountLimit() {
+        while items.count > maxItems {
+            let indexToRemove = items.lastIndex(where: { !$0.isPinned }) ?? items.count - 1
+            items.remove(at: indexToRemove)
         }
     }
 
     private func loadExcludedApps() {
+        let hasMigratedDefaults = UserDefaults.standard.integer(forKey: defaultExclusionsVersionKey) >= defaultExclusionsVersion
+
         if let saved = UserDefaults.standard.array(forKey: excludedAppsKey) as? [String] {
-            excludedApps = Set(saved)
+            let savedApps = Set(saved)
+            excludedApps = hasMigratedDefaults ? savedApps : savedApps.union(defaultExcludedApps)
+            if excludedApps != savedApps || !hasMigratedDefaults {
+                saveExcludedApps()
+            }
         } else {
-            // Default exclusions for common password managers and sensitive apps
-            excludedApps = Set([
-                "com.1password.1password",           // 1Password
-                "com.agilebits.onepassword7",        // 1Password 7
-                "com.lastpass.LastPass",             // LastPass
-                "com.bitwarden.desktop",             // Bitwarden
-                "com.dashlane.Dashlane",             // Dashlane
-                "com.keeper.KeeperPasswordManager",  // Keeper
-                "com.nordpass.NordPass"              // NordPass
-            ])
+            excludedApps = defaultExcludedApps
             saveExcludedApps()
+        }
+
+        if !hasMigratedDefaults {
+            UserDefaults.standard.set(defaultExclusionsVersion, forKey: defaultExclusionsVersionKey)
         }
     }
 
@@ -238,12 +427,26 @@ class ClipboardHistory: ObservableObject {
 class ClipboardMonitor {
     private var timer: Timer?
     private var lastChangeCount: Int = 0
+    private var lastObservedFrontmostBundleID: String?
     private let history: ClipboardHistory
+    private let writeTracker: PasteboardWriteTracker
+    private let screenshotCoordinator: ScreenshotCaptureCoordinator
+    private let processingQueue = DispatchQueue(
+        label: "com.yourcompany.echocopy.clipboard-processing",
+        qos: .userInitiated
+    )
     private let checkInterval: TimeInterval = 0.5
 
-    init(history: ClipboardHistory) {
+    init(
+        history: ClipboardHistory,
+        writeTracker: PasteboardWriteTracker = .shared,
+        screenshotCoordinator: ScreenshotCaptureCoordinator = .shared
+    ) {
         self.history = history
+        self.writeTracker = writeTracker
+        self.screenshotCoordinator = screenshotCoordinator
         self.lastChangeCount = NSPasteboard.general.changeCount
+        self.lastObservedFrontmostBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
     }
 
     func start() {
@@ -265,47 +468,165 @@ class ClipboardMonitor {
     @MainActor
     private func checkClipboard() {
         let currentChangeCount = NSPasteboard.general.changeCount
+        let currentBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let previouslyObservedBundleID = lastObservedFrontmostBundleID
+        lastObservedFrontmostBundleID = currentBundleID
 
-        if currentChangeCount != lastChangeCount {
-            lastChangeCount = currentChangeCount
+        guard currentChangeCount != lastChangeCount else { return }
+        lastChangeCount = currentChangeCount
 
-            // Check if the source app is excluded
-            let frontmostApp = NSWorkspace.shared.frontmostApplication
-            let bundleID = frontmostApp?.bundleIdentifier
-            if history.isAppExcluded(bundleID) {
-                // Don't save clipboard content from excluded apps
-                return
+        // EchoCopy deliberately changed the pasteboard. Do not feed that write
+        // back into history and trigger another encryption/save cycle.
+        guard !writeTracker.consumeIfInternal(changeCount: currentChangeCount) else {
+            return
+        }
+
+        let pasteboard = NSPasteboard.general
+        let pasteboardTypeIdentifiers = pasteboard.types?.map(\.rawValue) ?? []
+        guard !ClipboardPolicy.containsSuppressedPasteboardType(pasteboardTypeIdentifiers) else {
+            screenshotCoordinator.cancelIfPasteboardChanged(to: currentChangeCount)
+            return
+        }
+
+        // NSPasteboard does not provide a trustworthy source application. The
+        // previous/current apps bracket the copy event. Allow transitions only
+        // when both apps are known and neither is excluded; this catches a fast
+        // copy-then-switch back to EchoCopy without leaking content across a
+        // password manager. A user-initiated screenshot remains a special case.
+        let sourceIsExcluded = currentBundleID.map(history.isAppExcluded) ?? false
+        let ordinarySourceCanBeStored = ClipboardPolicy.canStoreClipboardChange(
+            previousBundleID: previouslyObservedBundleID,
+            currentBundleID: currentBundleID,
+            excludedBundleIDs: history.excludedApps
+        )
+        let isAwaitingScreenshot = screenshotCoordinator.isAwaitingScreenshot(
+            pasteboardChangeCount: currentChangeCount
+        )
+
+        // Check for image FIRST (images often come with URLs, so check images before URLs).
+        // Reject oversized source data before asking AppKit to decode it.
+        let imageTypes: [(type: NSPasteboard.PasteboardType, filename: String)] = [
+            (.png, "image.png"),
+            (NSPasteboard.PasteboardType("public.jpeg"), "image.jpg"),
+            (.tiff, "image.tiff")
+        ]
+
+        var selectedImage: (data: Data, filename: String)?
+        for candidate in imageTypes {
+            guard let data = pasteboard.data(forType: candidate.type) else { continue }
+
+            let isWithinLimit = isAwaitingScreenshot
+                ? data.count <= ClipboardPolicy.maxScreenshotSourceBytes
+                : ClipboardPolicy.acceptsImagePasteboardData(byteCount: data.count)
+            if isWithinLimit {
+                selectedImage = (data, candidate.filename)
+                break
             }
+        }
 
-            let pasteboard = NSPasteboard.general
+        if let selectedImage,
+           ordinarySourceCanBeStored || isAwaitingScreenshot {
+            let screenshotSaveRequest = isAwaitingScreenshot
+                ? screenshotCoordinator.consumeScreenshot(
+                    pasteboardChangeCount: currentChangeCount
+                )
+                : nil
 
-            // Check for image FIRST (images often come with URLs, so check images before URLs)
-            if let image = pasteboard.readObjects(forClasses: [NSImage.self]) as? [NSImage], let nsImage = image.first {
-                if let tiffData = nsImage.tiffRepresentation {
-                    let base64 = tiffData.base64EncodedString()
-                    history.addItem(base64, contentType: .image, filename: "image.png")
+            prepareImageForHistory(
+                selectedImage.data,
+                filename: selectedImage.filename,
+                screenshotSaveRequest: screenshotSaveRequest,
+                shouldAddToHistory: ordinarySourceCanBeStored
+                    || (isAwaitingScreenshot && !sourceIsExcluded)
+            )
+            return
+        }
+
+        if isAwaitingScreenshot {
+            // The first post-shortcut pasteboard change was not a usable image;
+            // do not mistake a later, unrelated copied image for the screenshot.
+            screenshotCoordinator.cancelIfPasteboardChanged(to: currentChangeCount)
+        }
+
+        guard ordinarySourceCanBeStored else { return }
+
+        // Check for URL
+        if let urls = pasteboard.readObjects(forClasses: [NSURL.self]) as? [NSURL],
+           let url = urls.first {
+            history.addItem(url.absoluteString ?? "", contentType: .url)
+            return
+        }
+
+        // Check for text with RTF support.
+        if let stringContent = pasteboard.string(forType: .string),
+           !stringContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if let rtfData = pasteboard.data(forType: .rtf) {
+                guard ClipboardPolicy.acceptsRTFPasteboardData(byteCount: rtfData.count) else {
+                    return
                 }
+                prepareTextForHistory(stringContent, rtfData: rtfData)
+            } else {
+                history.addItem(stringContent, contentType: .text)
+            }
+        }
+    }
+
+    private func prepareImageForHistory(
+        _ imageData: Data,
+        filename: String,
+        screenshotSaveRequest: ScreenshotSaveRequest? = nil,
+        shouldAddToHistory: Bool = true
+    ) {
+        processingQueue.async { [weak self] in
+            guard let self,
+                  CGImageSourceCreateWithData(imageData as CFData, nil) != nil else {
                 return
             }
 
-            // Check for URL
-            if let urls = pasteboard.readObjects(forClasses: [NSURL.self]) as? [NSURL], let url = urls.first {
-                history.addItem(url.absoluteString ?? "", contentType: .url)
+            let savedScreenshot = screenshotSaveRequest.flatMap {
+                ScreenshotFileSaver.save(imageData: imageData, request: $0)
+            }
+            guard shouldAddToHistory else { return }
+
+            let preparedImageData = savedScreenshot?.imageData ?? imageData
+            let preparedFilename = savedScreenshot?.fileURL.lastPathComponent ?? filename
+            let base64 = preparedImageData.base64EncodedString()
+            guard ClipboardPolicy.acceptsStoredItem(
+                content: base64,
+                contentType: .image,
+                rtfContent: nil,
+                filename: preparedFilename
+            ) else {
                 return
             }
 
-            // Check for text with RTF support
-            if let stringContent = pasteboard.string(forType: .string) {
-                if !stringContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    var rtfBase64: String? = nil
+            DispatchQueue.main.async { [weak self] in
+                self?.history.addPreparedItem(
+                    base64,
+                    contentType: .image,
+                    filename: preparedFilename
+                )
+            }
+        }
+    }
 
-                    // Try to capture RTF formatting
-                    if let rtfData = pasteboard.data(forType: .rtf) {
-                        rtfBase64 = rtfData.base64EncodedString()
-                    }
+    private func prepareTextForHistory(_ text: String, rtfData: Data) {
+        processingQueue.async { [weak self] in
+            let rtfBase64 = rtfData.base64EncodedString()
+            guard ClipboardPolicy.acceptsStoredItem(
+                content: text,
+                contentType: .text,
+                rtfContent: rtfBase64
+            ) else {
+                return
+            }
 
-                    history.addItem(stringContent, contentType: .text, rtfContent: rtfBase64)
-                }
+            DispatchQueue.main.async { [weak self] in
+                self?.history.addPreparedItem(
+                    text,
+                    contentType: .text,
+                    rtfContent: rtfBase64
+                )
             }
         }
     }
@@ -321,6 +642,10 @@ class SystemMonitor {
     private var numPrevCpuInfo: mach_msg_type_number_t = 0
     private var numCPUs: uint = 0
     private let cpuUsageLock = NSLock()
+    private let statsQueue = DispatchQueue(
+        label: "com.yourcompany.echocopy.system-stats",
+        qos: .utility
+    )
 
     var onUpdate: ((String) -> Void)?
 
@@ -338,11 +663,12 @@ class SystemMonitor {
 
     func start() {
         // Update immediately
-        updateStats()
+        requestStatsUpdate()
 
-        // Then update every 3 seconds
-        updateTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            self?.updateStats()
+        // The tooltip does not need high-frequency refreshes. Keep periodic
+        // system calls off the main thread and reduce unnecessary wakeups.
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
+            self?.requestStatsUpdate()
         }
     }
 
@@ -351,19 +677,23 @@ class SystemMonitor {
         updateTimer = nil
     }
 
-    private func updateStats() {
-        let cpuUsage = getCPUUsage()
-        let memoryUsage = getMemoryUsage()
-        let diskUsage = getDiskUsage()
+    private func requestStatsUpdate() {
+        statsQueue.async { [weak self] in
+            guard let self else { return }
 
-        let tooltip = """
-        CPU: \(String(format: "%.1f", cpuUsage))%
-        Memory: \(memoryUsage.used) / \(memoryUsage.total) (\(String(format: "%.0f", memoryUsage.percentage))%)
-        Disk: \(diskUsage.used) / \(diskUsage.total) (\(String(format: "%.0f", diskUsage.percentage))%)
-        """
+            let cpuUsage = self.getCPUUsage()
+            let memoryUsage = self.getMemoryUsage()
+            let diskUsage = self.getDiskUsage()
 
-        DispatchQueue.main.async { [weak self] in
-            self?.onUpdate?(tooltip)
+            let tooltip = """
+            CPU: \(String(format: "%.1f", cpuUsage))%
+            Memory: \(memoryUsage.used) / \(memoryUsage.total) (\(String(format: "%.0f", memoryUsage.percentage))%)
+            Disk: \(diskUsage.used) / \(diskUsage.total) (\(String(format: "%.0f", diskUsage.percentage))%)
+            """
+
+            DispatchQueue.main.async { [weak self] in
+                self?.onUpdate?(tooltip)
+            }
         }
     }
 
@@ -743,12 +1073,11 @@ struct PopupItemRow: View {
 // MARK: - Menu Bar Manager
 
 @MainActor
-class MenuBarManager: NSObject, NSMenuDelegate {
+class MenuBarManager: NSObject {
     private var statusItem: NSStatusItem?
     private weak var history: ClipboardHistory?
     private weak var appDelegate: AppDelegate?
     private var historySubscription: AnyCancellable?
-    private var statusMenu: NSMenu?
     private var systemMonitor: SystemMonitor?
 
     init(history: ClipboardHistory, appDelegate: AppDelegate) {
@@ -764,10 +1093,14 @@ class MenuBarManager: NSObject, NSMenuDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         if let button = statusItem?.button {
-            button.image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "EchoCopy")
-            button.target = self
-            button.action = #selector(statusItemClicked)
-            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            if let image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "EchoCopy") {
+                button.image = image
+            } else {
+                // Keep the item discoverable on systems without this SF Symbol.
+                button.title = "EchoCopy"
+            }
+            button.toolTip = "EchoCopy"
+            button.setAccessibilityLabel("EchoCopy")
         }
 
         updateMenu()
@@ -791,79 +1124,49 @@ class MenuBarManager: NSObject, NSMenuDelegate {
     }
 
     private func updateMenu() {
-        DispatchQueue.main.async { [weak self] in
-            let menu = NSMenu()
+        let menu = NSMenu()
 
-            guard let history = self?.history else { return }
-            guard let strongSelf = self else { return }
+        guard let history else { return }
 
-            // Show top 10 items
-            let pinned = history.items.filter { $0.isPinned }
-            let unpinned = history.items.filter { !$0.isPinned }
-            let topItems = Array((pinned + unpinned).prefix(10))
-            for (index, item) in topItems.enumerated() {
-                var preview = item.menuPreview
-                preview = preview.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
-                preview = preview.trimmingCharacters(in: .whitespacesAndNewlines)
-                if preview.isEmpty { preview = "Item" }
+        // Show top 10 items
+        let pinned = history.items.filter { $0.isPinned }
+        let unpinned = history.items.filter { !$0.isPinned }
+        let topItems = Array((pinned + unpinned).prefix(10))
+        for (index, item) in topItems.enumerated() {
+            var preview = item.menuPreview
+            preview = preview.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
+            preview = preview.trimmingCharacters(in: .whitespacesAndNewlines)
+            if preview.isEmpty { preview = "Item" }
 
-                let clipped = preview.count > 40
-                    ? String(preview.prefix(40)).trimmingCharacters(in: .whitespacesAndNewlines) + "…"
-                    : preview
+            let clipped = preview.count > 40
+                ? String(preview.prefix(40)).trimmingCharacters(in: .whitespacesAndNewlines) + "…"
+                : preview
 
-                let title = "\(index + 1). \(clipped)"
-                let menuItem = NSMenuItem(title: title, action: #selector(MenuBarManager.pasteItem(_:)), keyEquivalent: "")
-                menuItem.representedObject = item
-                menuItem.target = strongSelf
-                menu.addItem(menuItem)
-            }
+            let title = "\(index + 1). \(clipped)"
+            let menuItem = NSMenuItem(title: title, action: #selector(MenuBarManager.pasteItem(_:)), keyEquivalent: "")
+            menuItem.representedObject = item
+            menuItem.target = self
+            menu.addItem(menuItem)
+        }
 
-            if !topItems.isEmpty {
-                menu.addItem(NSMenuItem.separator())
-            }
-
-            let openItem = NSMenuItem(title: "Open EchoCopy", action: #selector(MenuBarManager.openWindow), keyEquivalent: "")
-            openItem.target = strongSelf
-            menu.addItem(openItem)
-
-            let settingsItem = NSMenuItem(title: "Settings...", action: #selector(MenuBarManager.openSettings), keyEquivalent: ",")
-            settingsItem.target = strongSelf
-            menu.addItem(settingsItem)
-
+        if !topItems.isEmpty {
             menu.addItem(NSMenuItem.separator())
-            menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-
-            menu.delegate = strongSelf
-            self?.statusMenu = menu
-            // Keep the status item menu nil so left-click runs our action.
-            self?.statusItem?.menu = nil
-        }
-    }
-
-    @objc private func statusItemClicked() {
-        guard let event = NSApp.currentEvent else {
-            appDelegate?.toggleMainWindow()
-            return
         }
 
-        let isRightClick = (event.type == .rightMouseUp) || event.modifierFlags.contains(.control)
-        if isRightClick {
-            guard let statusItem else { return }
-            guard let menu = statusMenu else { return }
+        let openItem = NSMenuItem(title: "Open EchoCopy", action: #selector(MenuBarManager.openWindow), keyEquivalent: "")
+        openItem.target = self
+        menu.addItem(openItem)
 
-            // Temporarily attach the menu so it displays in the correct position.
-            statusItem.menu = menu
-            DispatchQueue.main.async { [weak self] in
-                self?.statusItem?.button?.performClick(nil)
-            }
-        } else {
-            appDelegate?.toggleMainWindow()
-        }
-    }
+        let settingsItem = NSMenuItem(title: "Settings...", action: #selector(MenuBarManager.openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
 
-    func menuDidClose(_ menu: NSMenu) {
-        // Restore left-click behavior after the menu closes.
-        statusItem?.menu = nil
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+
+        // Keep the menu attached so both left-click and control/right-click
+        // open it using the standard macOS status-item behavior.
+        statusItem?.menu = menu
     }
 
     @objc private func openWindow() {
@@ -884,15 +1187,29 @@ class MenuBarManager: NSObject, NSMenuDelegate {
 // MARK: - Global Keyboard Shortcut Handler
 
 class GlobalShortcutHandler {
+    private static let logger = Logger(
+        subsystem: "com.yourcompany.echocopy",
+        category: "GlobalShortcutHandler"
+    )
+
     private var eventMonitor: Any?
     private var eventTap: CFMachPort?
     private var eventTapSource: CFRunLoopSource?
+    private var swallowedScreenshotKeyCodes = Set<CGKeyCode>()
+    private var eventTapRetryScheduled = false
+    private var lastLoggedAccessibilityTrust: Bool?
+    private let screenshotCoordinator: ScreenshotCaptureCoordinator
     weak var history: ClipboardHistory?
     weak var appDelegate: AppDelegate?
 
-    init(history: ClipboardHistory, appDelegate: AppDelegate) {
+    init(
+        history: ClipboardHistory,
+        appDelegate: AppDelegate,
+        screenshotCoordinator: ScreenshotCaptureCoordinator = .shared
+    ) {
         self.history = history
         self.appDelegate = appDelegate
+        self.screenshotCoordinator = screenshotCoordinator
         setupGlobalShortcuts()
     }
 
@@ -901,14 +1218,25 @@ class GlobalShortcutHandler {
     }
 
     private func checkAccessibilityAndInstall() {
+        // Isolated UI smoke tests do not need global shortcuts and must not
+        // trigger a system Accessibility permission prompt.
+        if ProcessInfo.processInfo.environment["ECHOCOPY_DISABLE_GLOBAL_SHORTCUTS"] == "1" {
+            return
+        }
+
         let trusted = AXIsProcessTrusted()
+        appDelegate?.updateAccessibilityStatus(trusted)
+        if lastLoggedAccessibilityTrust != trusted {
+            lastLoggedAccessibilityTrust = trusted
+            Self.logger.notice(
+                "Accessibility trust reported by EchoCopy: \(trusted, privacy: .public)"
+            )
+        }
 
         if !trusted {
-            // Request permissions by showing system dialog
-            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
-            _ = AXIsProcessTrustedWithOptions(options as CFDictionary)
-            
-            // Poll for permission change since there is no notification for this
+            // Poll silently because macOS provides no change notification.
+            // Permission is user-managed in System Settings; EchoCopy never
+            // reopens the Accessibility authorization prompt on its own.
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
                 self?.checkAccessibilityAndInstall()
             }
@@ -920,7 +1248,10 @@ class GlobalShortcutHandler {
     private func installEventTap() {
         guard eventTap == nil else { return }
 
-        let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
+        let mask = CGEventMask(
+            (1 << CGEventType.keyDown.rawValue) |
+            (1 << CGEventType.keyUp.rawValue)
+        )
 
         let callback: CGEventTapCallBack = { proxy, type, event, refcon in
             guard let refcon else {
@@ -935,26 +1266,66 @@ class GlobalShortcutHandler {
         }
 
         let userInfo = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
-        guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: mask,
-            callback: callback,
-            userInfo: userInfo
-        ) else {
-            // Fallback: global monitor (cannot prevent the key from also reaching the focused app).
-            eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                self?.handleFallbackGlobalKeyEvent(event)
+        let tapLocations: [(location: CGEventTapLocation, name: String)] = [
+            (.cghidEventTap, "HID"),
+            (.cgSessionEventTap, "session")
+        ]
+        var installedTap: CFMachPort?
+        var installedTapName: String?
+
+        for candidate in tapLocations {
+            if let tap = CGEvent.tapCreate(
+                tap: candidate.location,
+                place: .headInsertEventTap,
+                options: .defaultTap,
+                eventsOfInterest: mask,
+                callback: callback,
+                userInfo: userInfo
+            ) {
+                installedTap = tap
+                installedTapName = candidate.name
+                break
             }
+        }
+
+        guard let tap = installedTap else {
+            Self.logger.error("Active keyboard event tap could not be installed")
+            // Keep non-swallowing shortcuts available, but do not permanently
+            // give up on the active event tap after one transient failure.
+            if eventMonitor == nil {
+                eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                    self?.handleFallbackGlobalKeyEvent(event)
+                }
+            }
+            scheduleEventTapRetry()
             return
         }
 
+        Self.logger.notice(
+            "Active keyboard event tap installed at \(installedTapName ?? "unknown", privacy: .public)"
+        )
+
+        eventTapRetryScheduled = false
+        if let eventMonitor {
+            NSEvent.removeMonitor(eventMonitor)
+            self.eventMonitor = nil
+        }
         eventTap = tap
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         eventTapSource = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
+    }
+
+    private func scheduleEventTapRetry() {
+        guard !eventTapRetryScheduled else { return }
+        eventTapRetryScheduled = true
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self else { return }
+            self.eventTapRetryScheduled = false
+            self.installEventTap()
+        }
     }
 
     private func handleEventTap(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
@@ -966,17 +1337,57 @@ class GlobalShortcutHandler {
             return Unmanaged.passUnretained(event)
         }
 
-        guard type == .keyDown else {
+        guard type == .keyDown || type == .keyUp else {
             return Unmanaged.passUnretained(event)
         }
 
         let flags = event.flags
         let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
 
+        if ScreenshotShortcutRemapper.isSyntheticScreenshotEvent(event) {
+            return Unmanaged.passUnretained(event)
+        }
+
+        if type == .keyUp {
+            if swallowedScreenshotKeyCodes.remove(keyCode) != nil {
+                return nil
+            }
+            return Unmanaged.passUnretained(event)
+        }
+
         let optionPressed = flags.contains(.maskAlternate)
         let cmdPressed = flags.contains(.maskCommand)
         let shiftPressed = flags.contains(.maskShift)
         let ctrlPressed = flags.contains(.maskControl)
+
+        if keyCode == CGKeyCode(kVK_Escape) {
+            screenshotCoordinator.cancelPendingCapture()
+        }
+
+        let isAutoRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+        if !isAutoRepeat,
+           ScreenshotShortcutPolicy.isStandardScreenshotShortcut(
+               keyCode: keyCode,
+               flags: flags
+           ),
+           screenshotCoordinator.beginAutomaticClipboardCapture(
+               startingPasteboardChangeCount: NSPasteboard.general.changeCount
+           ) {
+            guard let replacement =
+                    ScreenshotShortcutRemapper.makeClipboardShortcutReplacement(
+                        keyCode: keyCode,
+                        flags: flags
+                    ) else {
+                screenshotCoordinator.cancelPendingCapture()
+                return Unmanaged.passUnretained(event)
+            }
+
+            swallowedScreenshotKeyCodes.insert(keyCode)
+            for replacementEvent in replacement.events {
+                replacementEvent.post(tap: .cghidEventTap)
+            }
+            return nil
+        }
 
         // Control+V OR Cmd+Shift+V => show popup
         let cmdShiftVPressed = cmdPressed && shiftPressed && !optionPressed && !ctrlPressed && keyCode == CGKeyCode(kVK_ANSI_V)
@@ -1108,7 +1519,8 @@ class MenuBarWindowDelegate: NSObject, NSWindowDelegate {
 
 // MARK: - App Delegate
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
+    @Published private(set) var accessibilityTrusted = true
     var mainWindow: NSWindow?
     var menuBarManager: MenuBarManager?
     var shortcutHandler: GlobalShortcutHandler?
@@ -1120,6 +1532,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     weak var history: ClipboardHistory?
     weak var clipboardMonitor: ClipboardMonitor?
     private var hasAppliedPreferredSize = false
+
+    func updateAccessibilityStatus(_ trusted: Bool) {
+        if Thread.isMainThread {
+            if accessibilityTrusted != trusted {
+                accessibilityTrusted = trusted
+            }
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.updateAccessibilityStatus(trusted)
+            }
+        }
+    }
+
+    @discardableResult
+    func openAccessibilitySettings() -> Bool {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        ) else {
+            return false
+        }
+        return NSWorkspace.shared.open(url)
+    }
+
+    func revealCurrentAppInFinder() {
+        NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
+    }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         // Hide dock icon as early as possible
@@ -1145,6 +1583,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             self?.setupWindowBehavior()
         }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // Persist the latest coalesced snapshot before an orderly quit.
+        history?.flushPersistence()
     }
 
     func applyWindowBehavior(to window: NSWindow) {
@@ -1294,6 +1737,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let monitor = localEventMonitor {
             NSEvent.removeMonitor(monitor)
         }
+        if let monitor = globalClickMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
 
         // Clean up notification observers
         for (_, observer) in windowMiniaturizeObservers {
@@ -1306,6 +1752,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
 struct ContentView: View {
     @EnvironmentObject var history: ClipboardHistory
+    @EnvironmentObject var appDelegate: AppDelegate
     @Environment(\.openWindow) private var openWindow
     @State private var searchText = ""
 
@@ -1386,6 +1833,41 @@ struct ContentView: View {
                     .padding(.horizontal, 10)
                 }
                 .padding(.bottom, 10)
+
+                if !appDelegate.accessibilityTrusted {
+                    AccessibilityGuidanceBanner(appDelegate: appDelegate)
+                        .padding(.horizontal, 10)
+                        .padding(.bottom, 8)
+                }
+
+                if let persistenceError = history.persistenceError {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "lock.trianglebadge.exclamationmark")
+                                .foregroundColor(.orange)
+
+                            Text(persistenceError)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+
+                            Spacer(minLength: 0)
+                        }
+
+                        if history.canRetryHistoryUnlock {
+                            Button("Repair Secure History") {
+                                history.retryHistoryUnlock()
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                    }
+                    .padding(10)
+                    .background(Color.orange.opacity(0.1))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 8)
+                }
 
                 // Content
                 if history.items.isEmpty {
@@ -1507,6 +1989,114 @@ struct ContentView: View {
     }
 }
 
+struct AccessibilityGuidanceBanner: View {
+    @ObservedObject var appDelegate: AppDelegate
+    @State private var showSetupSteps = true
+
+    private var currentAppPath: String {
+        Bundle.main.bundleURL.path
+    }
+
+    @ViewBuilder
+    private func setupStep(_ number: Int, _ title: String, _ detail: String) -> some View {
+        HStack(alignment: .top, spacing: 7) {
+            Image(systemName: "(number).circle.fill")
+                .foregroundColor(.orange)
+                .font(.system(size: 13))
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+
+                Text(detail)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "hand.raised.fill")
+                    .foregroundColor(.orange)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Finish Accessibility setup")
+                        .font(.system(size: 12, weight: .semibold))
+
+                    Text(
+                        "This is a one-time setup for the current signed EchoCopy app. The old denied row cannot authorize this copy."
+                    )
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            Button(showSetupSteps ? "Hide setup steps" : "Show setup steps") {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    showSetupSteps.toggle()
+                }
+            }
+            .buttonStyle(.link)
+            .controlSize(.small)
+
+            if showSetupSteps {
+                VStack(alignment: .leading, spacing: 7) {
+                    setupStep(
+                        1,
+                        "Open Privacy & Security → Accessibility",
+                        "Use the button below to open the correct pane."
+                    )
+                    setupStep(
+                        2,
+                        "Clear any old denied EchoCopy row",
+                        "If the old row is still present, select it and click −. If you already deleted it, continue to the next step."
+                    )
+                    setupStep(
+                        3,
+                        "Add this current app",
+                        "Click +. If EchoCopy is not listed, press ⌘⇧G in the picker and use the path shown below."
+                    )
+                    Text(currentAppPath)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.leading, 20)
+                    setupStep(
+                        4,
+                        "Turn EchoCopy on",
+                        "Select the newly added row, enable its switch, then return here. EchoCopy will refresh automatically."
+                    )
+
+                    HStack(spacing: 8) {
+                        Button("Open Accessibility Settings") {
+                            _ = appDelegate.openAccessibilitySettings()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+
+                        Button("Show EchoCopy in Finder") {
+                            appDelegate.revealCurrentAppInFinder()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                }
+                .padding(.leading, 2)
+            }
+        }
+        .padding(10)
+        .background(Color.orange.opacity(0.1))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
 // MARK: - Visual Effect View
 struct VisualEffectView: NSViewRepresentable {
     let material: NSVisualEffectView.Material
@@ -1537,24 +2127,50 @@ extension View {
 }
 
 enum PasteboardWriter {
-    static func write(_ item: ClipboardItem, to pasteboard: NSPasteboard = .general) {
-        pasteboard.clearContents()
+    @MainActor
+    @discardableResult
+    static func write(
+        _ item: ClipboardItem,
+        to pasteboard: NSPasteboard = .general,
+        writeTracker: PasteboardWriteTracker = .shared
+    ) -> Bool {
+        let didWrite: Bool
 
         switch item.contentType {
         case .text, .url:
-            pasteboard.setString(item.content, forType: .string)
+            pasteboard.clearContents()
+            didWrite = pasteboard.setString(item.content, forType: .string)
             if let rtfBase64 = item.rtfContent,
                let rtfData = Data(base64Encoded: rtfBase64) {
                 pasteboard.setData(rtfData, forType: .rtf)
             }
         case .image:
-            if let data = Data(base64Encoded: item.content),
-               let image = NSImage(data: data) {
-                pasteboard.writeObjects([image])
+            guard let data = Data(base64Encoded: item.content),
+                  let pasteboardType = imagePasteboardType(for: data) else {
+                return false
             }
+
+            pasteboard.clearContents()
+            didWrite = pasteboard.setData(data, forType: pasteboardType)
         case .file:
-            pasteboard.setString(item.content, forType: .string)
+            pasteboard.clearContents()
+            didWrite = pasteboard.setString(item.content, forType: .string)
         }
+
+        if didWrite {
+            writeTracker.recordInternalWrite(changeCount: pasteboard.changeCount)
+        }
+
+        return didWrite
+    }
+
+    private static func imagePasteboardType(for data: Data) -> NSPasteboard.PasteboardType? {
+        guard let imageSource = CGImageSourceCreateWithData(data as CFData, nil),
+              let typeIdentifier = CGImageSourceGetType(imageSource) else {
+            return nil
+        }
+
+        return NSPasteboard.PasteboardType(typeIdentifier as String)
     }
 }
 
@@ -1597,6 +2213,49 @@ struct WindowAccessor: NSViewRepresentable {
 
     func updateNSView(_ nsView: _WindowDetectorView, context: Context) {
         // No-op
+    }
+}
+
+struct ClipboardImagePreview: View {
+    let itemID: UUID
+    let base64Content: String
+
+    @State private var thumbnail: CGImage?
+    @State private var hasRequestedThumbnail = false
+
+    var body: some View {
+        ZStack {
+            Color.primary.opacity(0.03)
+
+            if let thumbnail {
+                Image(decorative: thumbnail, scale: 1)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+            } else {
+                Image(systemName: "photo")
+                    .font(.system(size: 24, weight: .medium))
+                    .foregroundColor(.secondary.opacity(0.45))
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 140)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.primary.opacity(0.1), lineWidth: 0.5)
+        )
+        .accessibilityLabel("Clipboard image preview")
+        .onAppear {
+            guard !hasRequestedThumbnail else { return }
+            hasRequestedThumbnail = true
+
+            ClipboardThumbnailCache.shared.load(
+                itemID: itemID,
+                base64Content: base64Content
+            ) { image in
+                thumbnail = image
+            }
+        }
     }
 }
 
@@ -1644,20 +2303,13 @@ struct ClipboardItemRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if item.contentType == .image, let data = Data(base64Encoded: item.content), let nsImage = NSImage(data: data) {
+            if item.contentType == .image {
                 // Large Image Layout
                 VStack(alignment: .leading, spacing: 8) {
-                    Image(nsImage: nsImage)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 140)
-                        .background(Color.primary.opacity(0.03))
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .stroke(Color.primary.opacity(0.1), lineWidth: 0.5)
-                        )
+                    ClipboardImagePreview(
+                        itemID: item.id,
+                        base64Content: item.content
+                    )
                     
                     HStack {
                         VStack(alignment: .leading, spacing: 1) {
@@ -1816,7 +2468,10 @@ struct ClipboardItemRow: View {
 
 struct SettingsView: View {
     @EnvironmentObject var history: ClipboardHistory
+    @EnvironmentObject var appDelegate: AppDelegate
     @StateObject private var updateChecker = UpdateChecker()
+    @AppStorage(ScreenshotCaptureCoordinator.automaticClipboardPreferenceKey)
+    private var automaticallyCopyScreenshots = true
     @State private var newAppBundleID = ""
     @State private var showInvalidWarning = false
     @State private var selectedTab = 0
@@ -1837,6 +2492,47 @@ struct SettingsView: View {
 
     var body: some View {
         TabView(selection: $selectedTab) {
+            // General Tab
+            VStack(alignment: .leading, spacing: 16) {
+                Text("General")
+                    .font(.system(size: 20, weight: .bold))
+
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 10) {
+                        if !appDelegate.accessibilityTrusted {
+                            AccessibilityGuidanceBanner(appDelegate: appDelegate)
+                        }
+
+                        Toggle(
+                            "Automatically copy screenshots to the clipboard",
+                            isOn: $automaticallyCopyScreenshots
+                        )
+
+                        Text(
+                            "Standard Shift-Command-3, Shift-Command-4, and "
+                            + "Shift-Command-6 captures remain saved in your "
+                            + "Screenshot location and are also added to the clipboard."
+                        )
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                        Text("Uses EchoCopy's existing Accessibility access; no Desktop-folder access is requested.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(8)
+                }
+
+                Spacer()
+            }
+            .padding(20)
+            .tabItem {
+                Label("General", systemImage: "gearshape")
+            }
+            .tag(0)
+
             // Updates Tab
             VStack(alignment: .leading, spacing: 16) {
                 Text("Updates")
@@ -1883,21 +2579,15 @@ struct SettingsView: View {
                                 }
 
                                 Button {
-                                    updateChecker.downloadAndInstallUpdate()
+                                    updateChecker.openReleasePage()
                                 } label: {
-                                    if updateChecker.isDownloading {
-                                        HStack(spacing: 8) {
-                                            ProgressView()
-                                                .scaleEffect(0.5)
-                                                .frame(width: 12, height: 12)
-                                            Text("Downloading...")
-                                        }
-                                    } else {
-                                        Text("Download & Install Update")
-                                    }
+                                    Text("Open Official Release Page")
                                 }
                                 .buttonStyle(.borderedProminent)
-                                .disabled(updateChecker.isDownloading)
+
+                                Text("Download and install updates manually from the official release page.")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
                             }
                         } else if updateChecker.latestVersion != nil {
                             HStack {
@@ -1940,7 +2630,7 @@ struct SettingsView: View {
             .tabItem {
                 Label("Updates", systemImage: "arrow.triangle.2.circlepath")
             }
-            .tag(0)
+            .tag(1)
 
             // App Exclusions Tab
             VStack(alignment: .leading, spacing: 16) {
@@ -2036,7 +2726,7 @@ struct SettingsView: View {
             .tabItem {
                 Label("Exclusions", systemImage: "shield")
             }
-            .tag(1)
+            .tag(2)
         }
         .frame(width: 500, height: 450)
     }
@@ -2050,7 +2740,10 @@ struct SettingsView: View {
             "com.bitwarden.desktop": "Bitwarden",
             "com.dashlane.Dashlane": "Dashlane",
             "com.keeper.KeeperPasswordManager": "Keeper",
-            "com.nordpass.NordPass": "NordPass"
+            "com.nordpass.NordPass": "NordPass",
+            "com.apple.keychainaccess": "Keychain Access",
+            "com.apple.Passwords": "Passwords",
+            "com.apple.passwords": "Passwords"
         ]
 
         return knownApps[bundleID] ?? bundleID
@@ -2062,16 +2755,14 @@ struct SettingsView: View {
 class UpdateChecker: ObservableObject {
     @Published var updateAvailable = false
     @Published var latestVersion: String?
-    @Published var downloadURL: String?
     @Published var isChecking = false
-    @Published var isDownloading = false
-    @Published var downloadProgress: Double = 0
     @Published var lastCheckDate: Date?
     @Published var errorMessage: String?
 
     // GitHub repo
     private let githubOwner = "conman777"
     private let githubRepo = "EchoCopy"
+    private let releasePageURL = URL(string: "https://github.com/conman777/EchoCopy/releases/latest")!
 
     private var currentVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.4"
@@ -2128,14 +2819,7 @@ class UpdateChecker: ObservableObject {
 
                 do {
                     if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                       let tagName = json["tag_name"] as? String,
-                       let assets = json["assets"] as? [[String: Any]] {
-
-                        // Find the zip asset
-                        if let zipAsset = assets.first(where: { ($0["name"] as? String)?.hasSuffix(".zip") == true }),
-                           let downloadURL = zipAsset["browser_download_url"] as? String {
-                            self.downloadURL = downloadURL
-                        }
+                       let tagName = json["tag_name"] as? String {
 
                         let latestVersion = tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName
                         self.latestVersion = latestVersion
@@ -2152,90 +2836,6 @@ class UpdateChecker: ObservableObject {
         }.resume()
     }
 
-    func downloadAndInstallUpdate() {
-        guard let downloadURLString = downloadURL, let url = URL(string: downloadURLString) else { return }
-        
-        isDownloading = true
-        downloadProgress = 0
-        errorMessage = nil
-        
-        let destinationURL = FileManager.default.temporaryDirectory.appendingPathComponent("EchoCopyUpdate.zip")
-        
-        // Remove old update file if exists
-        try? FileManager.default.removeItem(at: destinationURL)
-        
-        let task = URLSession.shared.downloadTask(with: url) { [weak self] location, response, error in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                self.isDownloading = false
-                
-                if let error = error {
-                    self.errorMessage = "Download failed: \(error.localizedDescription)"
-                    return
-                }
-                
-                guard let location = location else {
-                    self.errorMessage = "Download failed: No location"
-                    return
-                }
-                
-                do {
-                    try FileManager.default.moveItem(at: location, to: destinationURL)
-                    self.installUpdate(from: destinationURL)
-                } catch {
-                    self.errorMessage = "Failed to save update: \(error.localizedDescription)"
-                }
-            }
-        }
-        
-        task.resume()
-    }
-
-    private func installUpdate(from zipURL: URL) {
-        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("EchoCopyExtract")
-        try? FileManager.default.removeItem(at: tempDir)
-        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-        process.arguments = ["-q", zipURL.path, "-d", tempDir.path]
-        
-        do {
-            try process.run()
-            process.waitUntilExit()
-            
-            // Find the .app in the extracted folder
-            let contents = try FileManager.default.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil)
-            guard let appBundle = contents.first(where: { $0.pathExtension == "app" }) else {
-                errorMessage = "Could not find app bundle in update"
-                return
-            }
-            
-            // We'll use a shell script to replace the app and restart it
-            // This is necessary because we can't easily replace the running executable
-            let currentAppURL = Bundle.main.bundleURL
-            let script = """
-            sleep 1
-            rm -rf "\(currentAppURL.path)"
-            cp -R "\(appBundle.path)" "\(currentAppURL.path)"
-            open "\(currentAppURL.path)"
-            """
-            
-            let updateScriptURL = FileManager.default.temporaryDirectory.appendingPathComponent("update_script.sh")
-            try script.write(to: updateScriptURL, atomically: true, encoding: .utf8)
-            
-            let restartProcess = Process()
-            restartProcess.executableURL = URL(fileURLWithPath: "/bin/sh")
-            restartProcess.arguments = [updateScriptURL.path]
-            try restartProcess.run()
-            
-            NSApplication.shared.terminate(nil)
-            
-        } catch {
-            errorMessage = "Installation failed: \(error.localizedDescription)"
-        }
-    }
-
     private func isNewerVersion(_ new: String, than current: String) -> Bool {
         let newParts = new.split(separator: ".").compactMap { Int($0) }
         let currentParts = current.split(separator: ".").compactMap { Int($0) }
@@ -2250,10 +2850,8 @@ class UpdateChecker: ObservableObject {
         return false
     }
 
-    func openDownloadPage() {
-        if let urlString = downloadURL, let url = URL(string: urlString) {
-            NSWorkspace.shared.open(url)
-        }
+    func openReleasePage() {
+        NSWorkspace.shared.open(releasePageURL)
     }
 }
 
@@ -2269,17 +2867,20 @@ struct EchoCopyApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(history)
+                .environmentObject(appDelegate)
         }
         .windowStyle(.hiddenTitleBar)
 
         Window("Settings", id: "settings") {
             SettingsView()
                 .environmentObject(history)
+                .environmentObject(appDelegate)
         }
 
         Settings {
             SettingsView()
                 .environmentObject(history)
+                .environmentObject(appDelegate)
         }
     }
 

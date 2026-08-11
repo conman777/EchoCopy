@@ -1,8 +1,8 @@
-# Clipboard Manager - Distribution Guide
+# EchoCopy - Distribution Guide
 
 ## ⚠️ Important: Choose Your Distribution Method
 
-Your app uses **Accessibility Permissions** for global keyboard shortcuts (Option+V). This makes it **unsuitable for Mac App Store distribution** because:
+EchoCopy uses **Accessibility Permissions** for global keyboard shortcuts (Control+V and Command+Shift+V). This makes it **unsuitable for Mac App Store distribution** because:
 - App Store apps must be sandboxed
 - Sandboxed apps cannot request accessibility permissions
 - Apple typically rejects clipboard managers
@@ -42,13 +42,19 @@ Your app uses **Accessibility Permissions** for global keyboard shortcuts (Optio
 
 ### Step 3: Configure Build Script
 
-Edit `build-and-notarize.sh`:
+Provide the release configuration through the environment when invoking `build-and-notarize.sh`:
 
 ```bash
-# Update these lines with your actual values:
-DEVELOPER_ID="Developer ID Application: Your Name (YOUR_TEAM_ID)"
-BUNDLE_ID="com.yourcompany.clipboardmanager"  # Must be unique
+export DEVELOPER_ID="Developer ID Application: Your Name (YOUR_TEAM_ID)"
+export BUNDLE_ID="com.yourcompany.echocopy"
+export VERSION="1.0.4"
+./build-and-notarize.sh
 ```
+
+Keep `com.yourcompany.echocopy` for upgrades of the existing app. Changing the
+bundle identifier creates a new macOS Accessibility permission and preferences
+identity, so existing users would need an explicit migration and permission
+grant before such a change ships.
 
 To find your Developer ID certificate name:
 ```bash
@@ -58,7 +64,7 @@ security find-identity -v -p codesigning
 ### Step 4: Build and Sign
 
 ```bash
-cd "/Users/yourname/path/to/copynoteapple"
+cd "/Users/yourname/path/to/EchoCopy"
 ./build-and-notarize.sh
 ```
 
@@ -75,7 +81,7 @@ After the build completes, run:
 
 ```bash
 # Replace with your actual values
-xcrun notarytool submit ClipboardManager-1.0.0.dmg \
+xcrun notarytool submit EchoCopy-1.0.4.dmg \
   --apple-id your.email@example.com \
   --team-id YOUR_TEAM_ID \
   --password xxxx-xxxx-xxxx-xxxx \
@@ -92,24 +98,24 @@ Processing complete
 ### Step 6: Staple the Notarization
 
 ```bash
-xcrun stapler staple ClipboardManager-1.0.0.dmg
+xcrun stapler staple EchoCopy-1.0.4.dmg
 ```
 
 ### Step 7: Verify
 
 ```bash
-spctl -a -vv -t install ClipboardManager-1.0.0.dmg
+spctl -a -vv -t install EchoCopy-1.0.4.dmg
 ```
 
 You should see:
 ```
-ClipboardManager-1.0.0.dmg: accepted
+EchoCopy-1.0.4.dmg: accepted
 source=Notarized Developer ID
 ```
 
 ### Step 8: Distribute!
 
-Your `ClipboardManager-1.0.0.dmg` is now ready to distribute:
+Your `EchoCopy-1.0.4.dmg` is now ready to distribute:
 - Upload to your website
 - Share on GitHub Releases
 - Distribute directly to users
@@ -139,9 +145,9 @@ xcode-select --install
 
 ### "Invalid Code Signature"
 
-Make sure your `ClipboardManager.entitlements` file exists and is valid:
+Make sure your `EchoCopy.entitlements` file exists and is valid:
 ```bash
-cat ClipboardManager.entitlements
+cat EchoCopy.entitlements
 ```
 
 ### Notarization Failed
@@ -171,9 +177,9 @@ Common issues:
 
 ---
 
-## Alternative: Sparkle Framework (Auto-Updates)
+## Future automatic updates
 
-For automatic updates, integrate Sparkle:
+If automatic updates are added later, integrate a signed updater such as Sparkle:
 1. Add Sparkle framework: https://sparkle-project.org/
 2. Create an appcast XML file
 3. Host updates on your server
