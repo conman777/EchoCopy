@@ -7,6 +7,8 @@ import ApplicationServices
 import Carbon.HIToolbox
 import ImageIO
 import OSLog
+import UniformTypeIdentifiers
+import Darwin
 
 // MARK: - Data Models
 
@@ -58,8 +60,10 @@ struct ClipboardItem: Codable, Identifiable, Sendable {
     var menuPreview: String {
         switch contentType {
         case .text:
-            let firstLine = content.components(separatedBy: .newlines).first ?? ""
-            let trimmed = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmed = boundedPreview(
+                characterLimit: 46,
+                stopsAtFirstNewline: true
+            )
             return trimmed.isEmpty ? "Text" : trimmed
         case .image:
             return filename ?? "Image"
@@ -71,6 +75,60 @@ struct ClipboardItem: Codable, Identifiable, Sendable {
         case .file:
             return filename ?? "File"
         }
+    }
+
+    /// Keeps SwiftUI labels from materializing an entire megabyte-sized
+    /// clipboard string when a row only displays a single short line.
+    var listPreview: String {
+        switch contentType {
+        case .text:
+            let preview = boundedPreview(
+                characterLimit: 240,
+                stopsAtFirstNewline: false
+            )
+            return preview.isEmpty ? "Text" : preview
+        case .image:
+            return filename ?? "Image"
+        case .url:
+            return boundedPreview(characterLimit: 240, stopsAtFirstNewline: true)
+        case .file:
+            return filename ?? boundedPreview(
+                characterLimit: 240,
+                stopsAtFirstNewline: true
+            )
+        }
+    }
+
+    private func boundedPreview(
+        characterLimit: Int,
+        stopsAtFirstNewline: Bool
+    ) -> String {
+        guard characterLimit > 0 else { return "" }
+
+        var preview = String()
+        preview.reserveCapacity(min(characterLimit, 256))
+        var appendedCharacters = 0
+
+        for character in content {
+            if character.isNewline {
+                if stopsAtFirstNewline {
+                    break
+                }
+                if preview.last != " " {
+                    preview.append(" ")
+                    appendedCharacters += 1
+                }
+            } else {
+                preview.append(character)
+                appendedCharacters += 1
+            }
+
+            if appendedCharacters >= characterLimit {
+                break
+            }
+        }
+
+        return preview.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
@@ -424,8 +482,10 @@ class ClipboardHistory: ObservableObject {
 
 // MARK: - Clipboard Monitoring
 
+@MainActor
 class ClipboardMonitor {
     private var timer: Timer?
+    private var applicationActivationObserver: NSObjectProtocol?
     private var lastChangeCount: Int = 0
     private var lastObservedFrontmostBundleID: String?
     private let history: ClipboardHistory
@@ -433,9 +493,10 @@ class ClipboardMonitor {
     private let screenshotCoordinator: ScreenshotCaptureCoordinator
     private let processingQueue = DispatchQueue(
         label: "com.yourcompany.echocopy.clipboard-processing",
-        qos: .userInitiated
+        qos: .utility
     )
     private let checkInterval: TimeInterval = 0.5
+    private let timerTolerance: TimeInterval = 0.2
 
     init(
         history: ClipboardHistory,
@@ -450,12 +511,28 @@ class ClipboardMonitor {
     }
 
     func start() {
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.timer = Timer.scheduledTimer(withTimeInterval: self.checkInterval, repeats: true) { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    self?.checkClipboard()
-                }
+        guard timer == nil else { return }
+
+        let timer = Timer(timeInterval: checkInterval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.checkClipboard()
+            }
+        }
+        timer.tolerance = timerTolerance
+        RunLoop.main.add(timer, forMode: .default)
+        self.timer = timer
+
+        applicationActivationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                    as? NSRunningApplication else {
+                return
+            }
+            MainActor.assumeIsolated {
+                self?.checkClipboard(observedApplication: application)
             }
         }
     }
@@ -463,16 +540,32 @@ class ClipboardMonitor {
     func stop() {
         timer?.invalidate()
         timer = nil
+
+        if let applicationActivationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(
+                applicationActivationObserver
+            )
+            self.applicationActivationObserver = nil
+        }
     }
 
-    @MainActor
-    private func checkClipboard() {
+    private func checkClipboard(observedApplication: NSRunningApplication? = nil) {
         let currentChangeCount = NSPasteboard.general.changeCount
-        let currentBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+
+        // App activation notifications maintain source-app context without an
+        // NSWorkspace query on every idle timer tick. They also let a copy be
+        // processed immediately when the user switches apps.
+        guard currentChangeCount != lastChangeCount else {
+            if let observedApplication {
+                lastObservedFrontmostBundleID = observedApplication.bundleIdentifier
+            }
+            return
+        }
+
+        let currentBundleID = observedApplication?.bundleIdentifier
+            ?? NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         let previouslyObservedBundleID = lastObservedFrontmostBundleID
         lastObservedFrontmostBundleID = currentBundleID
-
-        guard currentChangeCount != lastChangeCount else { return }
         lastChangeCount = currentChangeCount
 
         // EchoCopy deliberately changed the pasteboard. Do not feed that write
@@ -630,463 +723,151 @@ class ClipboardMonitor {
             }
         }
     }
-}
-
-// MARK: - System Monitor
-
-class SystemMonitor {
-    private var updateTimer: Timer?
-    private var cpuInfo: processor_info_array_t?
-    private var prevCpuInfo: processor_info_array_t?
-    private var numCpuInfo: mach_msg_type_number_t = 0
-    private var numPrevCpuInfo: mach_msg_type_number_t = 0
-    private var numCPUs: uint = 0
-    private let cpuUsageLock = NSLock()
-    private let statsQueue = DispatchQueue(
-        label: "com.yourcompany.echocopy.system-stats",
-        qos: .utility
-    )
-
-    var onUpdate: ((String) -> Void)?
-
-    init() {
-        let mibKeys: [Int32] = [CTL_HW, HW_NCPU]
-        var numCPUsU: uint = 0
-        var sizeOfNumCPUs = MemoryLayout<uint>.size
-        let status = mibKeys.withUnsafeBufferPointer { mib in
-            sysctl(UnsafeMutablePointer(mutating: mib.baseAddress), 2, &numCPUsU, &sizeOfNumCPUs, nil, 0)
-        }
-        if status == 0 {
-            numCPUs = numCPUsU
-        }
-    }
-
-    func start() {
-        // Update immediately
-        requestStatsUpdate()
-
-        // The tooltip does not need high-frequency refreshes. Keep periodic
-        // system calls off the main thread and reduce unnecessary wakeups.
-        updateTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
-            self?.requestStatsUpdate()
-        }
-    }
-
-    func stop() {
-        updateTimer?.invalidate()
-        updateTimer = nil
-    }
-
-    private func requestStatsUpdate() {
-        statsQueue.async { [weak self] in
-            guard let self else { return }
-
-            let cpuUsage = self.getCPUUsage()
-            let memoryUsage = self.getMemoryUsage()
-            let diskUsage = self.getDiskUsage()
-
-            let tooltip = """
-            CPU: \(String(format: "%.1f", cpuUsage))%
-            Memory: \(memoryUsage.used) / \(memoryUsage.total) (\(String(format: "%.0f", memoryUsage.percentage))%)
-            Disk: \(diskUsage.used) / \(diskUsage.total) (\(String(format: "%.0f", diskUsage.percentage))%)
-            """
-
-            DispatchQueue.main.async { [weak self] in
-                self?.onUpdate?(tooltip)
-            }
-        }
-    }
-
-    private func getCPUUsage() -> Double {
-        var numCPUsU: natural_t = 0
-        var cpuInfoLocal: processor_info_array_t?
-        var numCpuInfoLocal: mach_msg_type_number_t = 0
-
-        let err = host_processor_info(mach_host_self(), PROCESSOR_CPU_LOAD_INFO, &numCPUsU, &cpuInfoLocal, &numCpuInfoLocal)
-
-        guard err == KERN_SUCCESS, let cpuInfoLocal = cpuInfoLocal else {
-            return 0.0
-        }
-
-        cpuUsageLock.lock()
-        defer { cpuUsageLock.unlock() }
-
-        var totalUsage: Double = 0
-
-        if let prevCpuInfo = prevCpuInfo {
-            for i in 0..<Int(numCPUs) {
-                var inUse: Int32
-                var total: Int32
-
-                let offset = Int32(CPU_STATE_MAX) * Int32(i)
-
-                inUse = cpuInfoLocal[Int(offset + CPU_STATE_USER)]
-                    - prevCpuInfo[Int(offset + CPU_STATE_USER)]
-                    + cpuInfoLocal[Int(offset + CPU_STATE_SYSTEM)]
-                    - prevCpuInfo[Int(offset + CPU_STATE_SYSTEM)]
-                    + cpuInfoLocal[Int(offset + CPU_STATE_NICE)]
-                    - prevCpuInfo[Int(offset + CPU_STATE_NICE)]
-
-                total = inUse
-                    + cpuInfoLocal[Int(offset + CPU_STATE_IDLE)]
-                    - prevCpuInfo[Int(offset + CPU_STATE_IDLE)]
-
-                if total > 0 {
-                    totalUsage += Double(inUse) / Double(total) * 100.0
-                }
-            }
-
-            // Deallocate previous
-            let prevSize = vm_size_t(MemoryLayout<integer_t>.stride * Int(numPrevCpuInfo))
-            vm_deallocate(mach_task_self_, vm_address_t(bitPattern: prevCpuInfo), prevSize)
-        }
-
-        prevCpuInfo = cpuInfoLocal
-        numPrevCpuInfo = numCpuInfoLocal
-        cpuInfo = cpuInfoLocal
-        numCpuInfo = numCpuInfoLocal
-
-        return numCPUs > 0 ? totalUsage / Double(numCPUs) : 0.0
-    }
-
-    private func getMemoryUsage() -> (used: String, total: String, percentage: Double) {
-        var stats = vm_statistics64()
-        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.stride / MemoryLayout<integer_t>.stride)
-
-        let result = withUnsafeMutablePointer(to: &stats) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
-            }
-        }
-
-        guard result == KERN_SUCCESS else {
-            return ("--", "--", 0)
-        }
-
-        let pageSize = UInt64(vm_kernel_page_size)
-        let totalMemory = ProcessInfo.processInfo.physicalMemory
-
-        let activeMemory = UInt64(stats.active_count) * pageSize
-        let wiredMemory = UInt64(stats.wire_count) * pageSize
-        let compressedMemory = UInt64(stats.compressor_page_count) * pageSize
-
-        let usedMemory = activeMemory + wiredMemory + compressedMemory
-        let percentage = Double(usedMemory) / Double(totalMemory) * 100.0
-
-        return (formatBytes(usedMemory), formatBytes(totalMemory), percentage)
-    }
-
-    private func getDiskUsage() -> (used: String, total: String, percentage: Double) {
-        let fileManager = FileManager.default
-
-        do {
-            let attributes = try fileManager.attributesOfFileSystem(forPath: "/")
-
-            if let totalSpace = attributes[.systemSize] as? UInt64,
-               let freeSpace = attributes[.systemFreeSize] as? UInt64 {
-                let usedSpace = totalSpace - freeSpace
-                let percentage = Double(usedSpace) / Double(totalSpace) * 100.0
-                return (formatBytes(usedSpace), formatBytes(totalSpace), percentage)
-            }
-        } catch {
-            // Ignore error
-        }
-
-        return ("--", "--", 0)
-    }
-
-    private func formatBytes(_ bytes: UInt64) -> String {
-        let gb = Double(bytes) / 1_073_741_824 // 1024^3
-        if gb >= 100 {
-            return String(format: "%.0f GB", gb)
-        } else if gb >= 10 {
-            return String(format: "%.1f GB", gb)
-        } else {
-            return String(format: "%.2f GB", gb)
-        }
-    }
 
     deinit {
-        stop()
-
-        // Clean up CPU info
-        if let cpuInfo = cpuInfo {
-            let size = vm_size_t(MemoryLayout<integer_t>.stride * Int(numCpuInfo))
-            vm_deallocate(mach_task_self_, vm_address_t(bitPattern: cpuInfo), size)
+        timer?.invalidate()
+        if let applicationActivationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(
+                applicationActivationObserver
+            )
         }
     }
 }
 
-// MARK: - Popup Window Manager
+// MARK: - Menu Bar Manager
 
-class PopupWindowManager {
-    private var popupWindow: NSWindow?
-    private weak var history: ClipboardHistory?
-    private var clickOutsideMonitor: Any?
-    private var windowWillCloseObserver: NSObjectProtocol?
-
-    init(history: ClipboardHistory) {
-        self.history = history
-    }
-
-    deinit {
-        closePopup()
-    }
-
-    func showPopup() {
-        guard let history = history else { return }
-
-        // Close existing popup if open (and clean up monitors/observers)
-        closePopup()
-
-        // Create hosting controller with popup view
-        let popupView = PopupView(history: history, onDismiss: { [weak self] in
-            self?.closePopup()
-        })
-        .environmentObject(history)
-
-        let hostingController = NSHostingController(rootView: popupView)
-        let popupSize = NSSize(width: 240, height: 190)
-        hostingController.view.frame = NSRect(origin: .zero, size: popupSize)
-
-        // Position near mouse cursor (clamped to the current screen's visible frame)
-        let mouseLocation = NSEvent.mouseLocation
-        let screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) ?? NSScreen.main
-        let visibleFrame = screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? NSRect(x: mouseLocation.x, y: mouseLocation.y, width: popupSize.width, height: popupSize.height)
-
-        var origin = CGPoint(
-            x: mouseLocation.x - (popupSize.width / 2),
-            y: mouseLocation.y - popupSize.height - 12
-        )
-
-        origin.x = min(max(origin.x, visibleFrame.minX + 8), visibleFrame.maxX - popupSize.width - 8)
-        origin.y = min(max(origin.y, visibleFrame.minY + 8), visibleFrame.maxY - popupSize.height - 8)
-
-        let frame = NSRect(origin: origin, size: popupSize)
-
-        // Create panel (better for popups than regular window)
-        let panel = NSPanel(
-            contentRect: frame,
-            styleMask: [.nonactivatingPanel, .borderless],
-            backing: .buffered,
-            defer: false
-        )
-        panel.contentViewController = hostingController
-        panel.level = .popUpMenu
-        panel.isOpaque = false
-        panel.backgroundColor = NSColor.clear
-        panel.hasShadow = false  // We're adding custom shadows in SwiftUI
-        panel.collectionBehavior = [.canJoinAllSpaces, .transient, .fullScreenAuxiliary]
-        panel.isReleasedWhenClosed = false
-        panel.hidesOnDeactivate = false
-        panel.becomesKeyOnlyIfNeeded = true
-
-        // Show panel
-        panel.orderFrontRegardless()
-        panel.makeKey()
-
-        self.popupWindow = panel
-
-        // Observe window close to ensure cleanup
-        windowWillCloseObserver = NotificationCenter.default.addObserver(
-            forName: NSWindow.willCloseNotification,
-            object: panel,
-            queue: .main
-        ) { [weak self] _ in
-            self?.closePopup()
-        }
-
-        // Monitor clicks outside the popup
-        clickOutsideMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
-            guard let self = self, let popupWindow = self.popupWindow else { return }
-
-            // Get mouse location in screen coordinates
-            let clickLocation = NSEvent.mouseLocation
-            let windowFrame = popupWindow.frame
-
-            // Check if click is outside popup window
-            if !windowFrame.contains(clickLocation) {
-                self.closePopup()
-            }
-        }
-    }
-
-    func closePopup() {
-        // Remove click monitor
-        if let monitor = clickOutsideMonitor {
-            NSEvent.removeMonitor(monitor)
-            clickOutsideMonitor = nil
-        }
-
-        // Remove window observer
-        if let observer = windowWillCloseObserver {
-            NotificationCenter.default.removeObserver(observer)
-            windowWillCloseObserver = nil
-        }
-
-        let windowToClose = popupWindow
-        popupWindow = nil
-        windowToClose?.close()
-    }
-}
-
-// MARK: - Popup View
-
-struct PopupView: View {
+struct MenuBarHistoryView: View {
     @ObservedObject var history: ClipboardHistory
-    let onDismiss: () -> Void
-    @State private var hoveredItemId: UUID?
+    let onPaste: (ClipboardItem) -> Void
+    let onOpenWindow: () -> Void
+    let onOpenSettings: () -> Void
+    let onQuit: () -> Void
+
+    static let width: CGFloat = 360
+    static let rowHeight: CGFloat = 24
+    static let separatorHeight: CGFloat = 1
+    static let footerHeight: CGFloat = 34
+
+    private var orderedItems: [ClipboardItem] {
+        MenuBarHistoryPresentation.orderedItems(history.items)
+    }
+
+    static func contentHeight(for itemCount: Int) -> CGFloat {
+        let rowCount = max(
+            1,
+            MenuBarHistoryPresentation.visibleRowCount(for: itemCount)
+        )
+        return CGFloat(rowCount) * rowHeight + separatorHeight + footerHeight
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            if history.items.isEmpty {
-                VStack(spacing: 12) {
-                    Image(systemName: "doc.on.clipboard")
-                        .font(.system(size: 18))
-                        .foregroundColor(.secondary.opacity(0.4))
-                    Text("Empty")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundColor(.secondary.opacity(0.6))
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if orderedItems.isEmpty {
+                Text("Clipboard history is empty")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: Self.rowHeight)
             } else {
-                VStack(alignment: .leading, spacing: 4) {
-                    ScrollView(showsIndicators: false) {
-                        VStack(spacing: 1) {
-                            ForEach(Array(history.items.prefix(15).enumerated()), id: \.element.id) { index, item in
-                                PopupItemRow(
-                                    item: item,
-                                    index: index,
-                                    isHovered: hoveredItemId == item.id,
-                                    onHover: { hovered in
-                                        hoveredItemId = hovered ? item.id : nil
-                                    },
-                                    onSelect: {
-                                        copyItem(item)
-                                        onDismiss()
-                                    }
-                                )
+                ScrollView(.vertical) {
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(orderedItems.enumerated()), id: \.element.id) { index, item in
+                            Button {
+                                onPaste(item)
+                            } label: {
+                                MenuBarHistoryRow(item: item, index: index)
                             }
+                            .buttonStyle(.plain)
+                            .accessibilityHint("Pastes this item into the previous app")
                         }
-                        .padding(4)
                     }
                 }
+                .frame(
+                    height: CGFloat(
+                        MenuBarHistoryPresentation.visibleRowCount(
+                            for: orderedItems.count
+                        )
+                    ) * Self.rowHeight
+                )
             }
-        }
-        .frame(width: 260, height: 360)
-        .background(
-            VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(Color.primary.opacity(0.1), lineWidth: 0.5)
-        )
-    }
 
-    private func copyItem(_ item: ClipboardItem) {
-        PasteboardWriter.write(item)
+            Divider()
+
+            HStack(spacing: 12) {
+                Button("Open EchoCopy", action: onOpenWindow)
+                    .buttonStyle(.plain)
+                    .fontWeight(.medium)
+
+                Spacer(minLength: 8)
+
+                Button("Settings", action: onOpenSettings)
+                    .buttonStyle(.plain)
+
+                Button("Quit", action: onQuit)
+                    .buttonStyle(.plain)
+            }
+            .font(.system(size: 11))
+            .padding(.horizontal, 12)
+            .frame(height: Self.footerHeight)
+        }
+        .frame(
+            width: Self.width,
+            height: Self.contentHeight(for: orderedItems.count)
+        )
     }
 }
 
-struct PopupItemRow: View {
+struct MenuBarHistoryRow: View {
     let item: ClipboardItem
     let index: Int
-    let isHovered: Bool
-    let onHover: (Bool) -> Void
-    let onSelect: () -> Void
+    @State private var isHovered = false
 
-    var contentIcon: String {
-        switch item.contentType {
-        case .text: return "doc.text"
-        case .image: return "photo"
-        case .url: return "link"
-        case .file: return "doc"
-        }
-    }
-
-    var iconColor: Color {
-        switch item.contentType {
-        case .text: return .blue
-        case .image: return .purple
-        case .url: return .orange
-        case .file: return .green
-        }
-    }
-
-    var contentPreview: String {
-        switch item.contentType {
-        case .text:
-            let content = item.content.trimmingCharacters(in: .whitespacesAndNewlines)
-            let lines = content.components(separatedBy: .newlines)
-            let firstLine = lines.first ?? ""
-            return firstLine.count > 40 ? String(firstLine.prefix(40)) + "..." : firstLine
-        case .image: return item.filename ?? "Image"
-        case .url: return item.content
-        case .file: return item.filename ?? "File"
-        }
+    private var preview: String {
+        let flattened = item.menuPreview
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = flattened.isEmpty ? "Item" : flattened
+        return value.count > 45
+            ? String(value.prefix(45)).trimmingCharacters(in: .whitespacesAndNewlines) + "…"
+            : value
     }
 
     var body: some View {
-        HStack(spacing: 8) {
-            Text("\(index + 1)")
-                .font(.system(size: 9, weight: .bold, design: .monospaced))
-                .foregroundColor(isHovered ? .white.opacity(0.8) : .secondary.opacity(0.4))
-                .frame(width: 12)
-
-            Image(systemName: contentIcon)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(isHovered ? .white : iconColor)
-                .frame(width: 14)
-
-            Text(contentPreview)
-                .font(.system(size: 11, weight: .medium, design: .rounded))
+        HStack(spacing: 0) {
+            Text("\(index + 1). \(preview)")
+                .font(.system(size: 13))
                 .foregroundColor(isHovered ? .white : .primary)
                 .lineLimit(1)
                 .truncationMode(.tail)
 
             Spacer(minLength: 0)
-
-            if isHovered {
-                Image(systemName: "return")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundColor(.white.opacity(0.6))
-            }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(isHovered ? Color.blue : Color.clear)
-        )
-        .onHover { hovering in
-            onHover(hovering)
-        }
-        .onTapGesture {
-            onSelect()
-        }
+        .padding(.horizontal, 10)
+        .frame(height: MenuBarHistoryView.rowHeight)
+        .frame(maxWidth: .infinity)
+        .background(isHovered ? Color.accentColor : Color.clear)
         .contentShape(Rectangle())
+        .onHover { isHovered = $0 }
+        .accessibilityLabel("\(index + 1). \(preview)")
     }
 }
-
-
-// MARK: - Menu Bar Manager
 
 @MainActor
 class MenuBarManager: NSObject {
     private var statusItem: NSStatusItem?
+    private let popover = NSPopover()
     private weak var history: ClipboardHistory?
     private weak var appDelegate: AppDelegate?
     private var historySubscription: AnyCancellable?
-    private var systemMonitor: SystemMonitor?
 
     init(history: ClipboardHistory, appDelegate: AppDelegate) {
         self.history = history
         self.appDelegate = appDelegate
         super.init()
         setupMenuBar()
-        setupHistoryObserver()
-        setupSystemMonitor()
+        setupPopover(history: history)
+        observeHistorySize()
     }
 
     private func setupMenuBar() {
@@ -1101,86 +882,72 @@ class MenuBarManager: NSObject {
             }
             button.toolTip = "EchoCopy"
             button.setAccessibilityLabel("EchoCopy")
+            button.target = self
+            button.action = #selector(togglePopover)
+            button.sendAction(on: [.leftMouseUp])
         }
-
-        updateMenu()
     }
 
-    private func setupHistoryObserver() {
-        // Subscribe to changes in the history
+    private func setupPopover(history: ClipboardHistory) {
+        let content = MenuBarHistoryView(
+            history: history,
+            onPaste: { [weak self] item in
+                self?.closePopover()
+                self?.appDelegate?.pasteHistoryItem(item)
+            },
+            onOpenWindow: { [weak self] in
+                self?.closePopover()
+                self?.appDelegate?.showMainWindow()
+            },
+            onOpenSettings: { [weak self] in
+                self?.closePopover()
+                self?.appDelegate?.showSettings()
+            },
+            onQuit: { [weak self] in
+                self?.closePopover()
+                NSApp.terminate(nil)
+            }
+        )
+
+        popover.behavior = .transient
+        popover.animates = true
+        popover.contentViewController = NSHostingController(rootView: content)
+        updatePopoverSize(for: history.items.count)
+    }
+
+    private func observeHistorySize() {
         historySubscription = history?.$items
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in
-                self?.updateMenu()
+            .sink { [weak self] items in
+                self?.updatePopoverSize(for: items.count)
             }
     }
 
-    private func setupSystemMonitor() {
-        systemMonitor = SystemMonitor()
-        systemMonitor?.onUpdate = { [weak self] tooltip in
-            self?.statusItem?.button?.toolTip = tooltip
-        }
-        systemMonitor?.start()
+    private func updatePopoverSize(for itemCount: Int) {
+        popover.contentSize = NSSize(
+            width: MenuBarHistoryView.width,
+            height: MenuBarHistoryView.contentHeight(for: itemCount)
+        )
     }
 
-    private func updateMenu() {
-        let menu = NSMenu()
+    @objc private func togglePopover() {
+        guard let button = statusItem?.button else { return }
 
-        guard let history else { return }
-
-        // Show top 10 items
-        let pinned = history.items.filter { $0.isPinned }
-        let unpinned = history.items.filter { !$0.isPinned }
-        let topItems = Array((pinned + unpinned).prefix(10))
-        for (index, item) in topItems.enumerated() {
-            var preview = item.menuPreview
-            preview = preview.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
-            preview = preview.trimmingCharacters(in: .whitespacesAndNewlines)
-            if preview.isEmpty { preview = "Item" }
-
-            let clipped = preview.count > 40
-                ? String(preview.prefix(40)).trimmingCharacters(in: .whitespacesAndNewlines) + "…"
-                : preview
-
-            let title = "\(index + 1). \(clipped)"
-            let menuItem = NSMenuItem(title: title, action: #selector(MenuBarManager.pasteItem(_:)), keyEquivalent: "")
-            menuItem.representedObject = item
-            menuItem.target = self
-            menu.addItem(menuItem)
+        if popover.isShown {
+            closePopover()
+            return
         }
 
-        if !topItems.isEmpty {
-            menu.addItem(NSMenuItem.separator())
-        }
-
-        let openItem = NSMenuItem(title: "Open EchoCopy", action: #selector(MenuBarManager.openWindow), keyEquivalent: "")
-        openItem.target = self
-        menu.addItem(openItem)
-
-        let settingsItem = NSMenuItem(title: "Settings...", action: #selector(MenuBarManager.openSettings), keyEquivalent: ",")
-        settingsItem.target = self
-        menu.addItem(settingsItem)
-
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-
-        // Keep the menu attached so both left-click and control/right-click
-        // open it using the standard macOS status-item behavior.
-        statusItem?.menu = menu
+        appDelegate?.prepareForHistoryInteraction()
+        popover.show(
+            relativeTo: button.bounds,
+            of: button,
+            preferredEdge: .minY
+        )
     }
 
-    @objc private func openWindow() {
-        appDelegate?.showMainWindow()
-    }
-
-    @objc private func openSettings() {
-        NSApp.activate(ignoringOtherApps: true)
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-    }
-
-    @objc private func pasteItem(_ sender: NSMenuItem) {
-        guard let item = sender.representedObject as? ClipboardItem else { return }
-        PasteboardWriter.write(item)
+    private func closePopover() {
+        popover.performClose(nil)
     }
 }
 
@@ -1192,40 +959,56 @@ class GlobalShortcutHandler {
         category: "GlobalShortcutHandler"
     )
 
-    private var eventMonitor: Any?
     private var eventTap: CFMachPort?
     private var eventTapSource: CFRunLoopSource?
+    private var defaultsObserver: NSObjectProtocol?
     private var swallowedScreenshotKeyCodes = Set<CGKeyCode>()
-    private var eventTapRetryScheduled = false
+    private var eventTapRetryWorkItem: DispatchWorkItem?
+    private var eventTapRetryAttempt = 0
     private var lastLoggedAccessibilityTrust: Bool?
     private let screenshotCoordinator: ScreenshotCaptureCoordinator
-    weak var history: ClipboardHistory?
     weak var appDelegate: AppDelegate?
 
     init(
-        history: ClipboardHistory,
         appDelegate: AppDelegate,
         screenshotCoordinator: ScreenshotCaptureCoordinator = .shared
     ) {
-        self.history = history
         self.appDelegate = appDelegate
         self.screenshotCoordinator = screenshotCoordinator
         setupGlobalShortcuts()
     }
 
     private func setupGlobalShortcuts() {
-        checkAccessibilityAndInstall()
+        defaultsObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.refreshConfiguration()
+        }
+        refreshConfiguration()
     }
 
-    private func checkAccessibilityAndInstall() {
+    func refreshConfiguration() {
+        eventTapRetryWorkItem?.cancel()
+        eventTapRetryWorkItem = nil
+        eventTapRetryAttempt = 0
+        applyConfiguration()
+    }
+
+    private func applyConfiguration() {
         // Isolated UI smoke tests do not need global shortcuts and must not
         // trigger a system Accessibility permission prompt.
         if ProcessInfo.processInfo.environment["ECHOCOPY_DISABLE_GLOBAL_SHORTCUTS"] == "1" {
+            uninstallEventTap()
             return
         }
 
         let trusted = AXIsProcessTrusted()
-        appDelegate?.updateAccessibilityStatus(trusted)
+        let delegate = appDelegate
+        Task { @MainActor [weak delegate] in
+            delegate?.updateAccessibilityStatus(trusted)
+        }
         if lastLoggedAccessibilityTrust != trusted {
             lastLoggedAccessibilityTrust = trusted
             Self.logger.notice(
@@ -1233,16 +1016,15 @@ class GlobalShortcutHandler {
             )
         }
 
-        if !trusted {
-            // Poll silently because macOS provides no change notification.
-            // Permission is user-managed in System Settings; EchoCopy never
-            // reopens the Accessibility authorization prompt on its own.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                self?.checkAccessibilityAndInstall()
-            }
-        } else {
-            installEventTap()
+        guard ScreenshotShortcutRuntimePolicy.shouldInstallEventTap(
+            automaticCaptureEnabled: screenshotCoordinator.isAutomaticClipboardCaptureEnabled,
+            accessibilityTrusted: trusted
+        ) else {
+            uninstallEventTap()
+            return
         }
+
+        installEventTap()
     }
 
     private func installEventTap() {
@@ -1290,13 +1072,6 @@ class GlobalShortcutHandler {
 
         guard let tap = installedTap else {
             Self.logger.error("Active keyboard event tap could not be installed")
-            // Keep non-swallowing shortcuts available, but do not permanently
-            // give up on the active event tap after one transient failure.
-            if eventMonitor == nil {
-                eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                    self?.handleFallbackGlobalKeyEvent(event)
-                }
-            }
             scheduleEventTapRetry()
             return
         }
@@ -1305,11 +1080,9 @@ class GlobalShortcutHandler {
             "Active keyboard event tap installed at \(installedTapName ?? "unknown", privacy: .public)"
         )
 
-        eventTapRetryScheduled = false
-        if let eventMonitor {
-            NSEvent.removeMonitor(eventMonitor)
-            self.eventMonitor = nil
-        }
+        eventTapRetryWorkItem?.cancel()
+        eventTapRetryWorkItem = nil
+        eventTapRetryAttempt = 0
         eventTap = tap
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         eventTapSource = source
@@ -1318,14 +1091,38 @@ class GlobalShortcutHandler {
     }
 
     private func scheduleEventTapRetry() {
-        guard !eventTapRetryScheduled else { return }
-        eventTapRetryScheduled = true
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-            guard let self else { return }
-            self.eventTapRetryScheduled = false
-            self.installEventTap()
+        let retryDelays: [TimeInterval] = [1, 4, 15]
+        guard eventTapRetryWorkItem == nil,
+              eventTapRetryAttempt < retryDelays.count else {
+            return
         }
+
+        let delay = retryDelays[eventTapRetryAttempt]
+        eventTapRetryAttempt += 1
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.eventTapRetryWorkItem = nil
+            self.applyConfiguration()
+        }
+        eventTapRetryWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func uninstallEventTap() {
+        eventTapRetryWorkItem?.cancel()
+        eventTapRetryWorkItem = nil
+
+        if let source = eventTapSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+            eventTapSource = nil
+        }
+
+        if let tap = eventTap {
+            CFMachPortInvalidate(tap)
+            eventTap = nil
+        }
+
+        swallowedScreenshotKeyCodes.removeAll(keepingCapacity: false)
     }
 
     private func handleEventTap(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
@@ -1354,11 +1151,6 @@ class GlobalShortcutHandler {
             }
             return Unmanaged.passUnretained(event)
         }
-
-        let optionPressed = flags.contains(.maskAlternate)
-        let cmdPressed = flags.contains(.maskCommand)
-        let shiftPressed = flags.contains(.maskShift)
-        let ctrlPressed = flags.contains(.maskControl)
 
         if keyCode == CGKeyCode(kVK_Escape) {
             screenshotCoordinator.cancelPendingCapture()
@@ -1401,97 +1193,15 @@ class GlobalShortcutHandler {
             return nil
         }
 
-        // Control+V OR Cmd+Shift+V => show popup
-        let cmdShiftVPressed = cmdPressed && shiftPressed && !optionPressed && !ctrlPressed && keyCode == CGKeyCode(kVK_ANSI_V)
-        
-        if (ctrlPressed && !optionPressed && !cmdPressed && !shiftPressed && keyCode == CGKeyCode(kVK_ANSI_V)) ||
-           cmdShiftVPressed {
-            Task { @MainActor [weak self] in
-                self?.appDelegate?.showPopupWindow()
-            }
-            return nil
-        }
-
-        // Cmd+Option+1..9 => quick paste (we do NOT swallow, to preserve app shortcuts).
-        if cmdPressed,
-           optionPressed,
-           !shiftPressed,
-           !ctrlPressed,
-           let digit = digitForKeyCode(keyCode),
-           digit >= 1,
-           digit <= 9 {
-            Task { @MainActor [weak self] in
-                self?.pasteQuickItem(at: digit - 1)
-            }
-            return Unmanaged.passUnretained(event)
-        }
-
         return Unmanaged.passUnretained(event)
     }
 
-    private func digitForKeyCode(_ keyCode: CGKeyCode) -> Int? {
-        switch Int(keyCode) {
-        case kVK_ANSI_1: return 1
-        case kVK_ANSI_2: return 2
-        case kVK_ANSI_3: return 3
-        case kVK_ANSI_4: return 4
-        case kVK_ANSI_5: return 5
-        case kVK_ANSI_6: return 6
-        case kVK_ANSI_7: return 7
-        case kVK_ANSI_8: return 8
-        case kVK_ANSI_9: return 9
-        default: return nil
-        }
-    }
-
-    private func handleFallbackGlobalKeyEvent(_ event: NSEvent) {
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let normalized = modifiers.subtracting([.capsLock, .numericPad, .function])
-        let controlPressed = normalized == .control
-        let cmdShiftPressed = normalized == [.command, .shift]
-        let cmdAltPressed = normalized == [.command, .option]
-
-        // Check for Control+V or Cmd+Shift+V to show popup
-        if (controlPressed || cmdShiftPressed), event.charactersIgnoringModifiers == "v" {
-            Task { @MainActor in
-                self.appDelegate?.showPopupWindow()
-            }
-            return
-        }
-
-        // Only handle if Cmd+Option is pressed for quick paste
-        guard cmdAltPressed else { return }
-
-        // Numbers 1-9 for quick paste
-        if let character = event.charactersIgnoringModifiers?.first,
-           let digit = Int(String(character)), digit >= 1, digit <= 9 {
-            Task { @MainActor in
-                pasteQuickItem(at: digit - 1)
-            }
-        }
-    }
-
-    @MainActor
-    private func pasteQuickItem(at index: Int) {
-        guard let history = history else { return }
-        guard index >= 0 && index < history.items.count else { return }
-
-        let item = history.items[index]
-        PasteboardWriter.write(item)
-    }
-
     deinit {
-        if let monitor = eventMonitor {
-            NSEvent.removeMonitor(monitor)
+        eventTapRetryWorkItem?.cancel()
+        if let defaultsObserver {
+            NotificationCenter.default.removeObserver(defaultsObserver)
         }
-
-        if let source = eventTapSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
-        }
-
-        if let tap = eventTap {
-            CFMachPortInvalidate(tap)
-        }
+        uninstallEventTap()
     }
 }
 
@@ -1499,23 +1209,22 @@ class GlobalShortcutHandler {
 
 class MenuBarWindow: NSWindow {
     override func miniaturize(_ sender: Any?) {
-        // Don't miniaturize - hide to menu bar instead
-        self.orderOut(nil)
+        // Release the history UI instead of retaining a hidden window.
+        close()
     }
 
     override func performMiniaturize(_ sender: Any?) {
-        // Intercept miniaturize action
-        self.orderOut(nil)
+        close()
     }
 }
 
 // MARK: - Window Delegate
 
 class MenuBarWindowDelegate: NSObject, NSWindowDelegate {
+    var onWindowClosed: ((NSWindow) -> Void)?
+
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        // Hide instead of close
-        sender.orderOut(nil)
-        return false
+        true
     }
 
     func window(_ window: NSWindow, willUseFullScreenPresentationOptions options: NSApplication.PresentationOptions = []) -> NSApplication.PresentationOptions {
@@ -1524,26 +1233,33 @@ class MenuBarWindowDelegate: NSObject, NSWindowDelegate {
 
     func windowDidResignKey(_ notification: Notification) {
         if let window = notification.object as? NSWindow {
-            window.orderOut(nil)
+            window.close()
+        }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        if let window = notification.object as? NSWindow {
+            onWindowClosed?(window)
         }
     }
 }
 
 // MARK: - App Delegate
 
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     @Published private(set) var accessibilityTrusted = true
     var mainWindow: NSWindow?
     var menuBarManager: MenuBarManager?
     var shortcutHandler: GlobalShortcutHandler?
-    var popupWindowManager: PopupWindowManager?
     var windowDelegate: MenuBarWindowDelegate?
     var localEventMonitor: Any?
-    var globalClickMonitor: Any?
     var windowMiniaturizeObservers: [ObjectIdentifier: NSObjectProtocol] = [:]
     weak var history: ClipboardHistory?
     weak var clipboardMonitor: ClipboardMonitor?
+    private weak var lastExternalApplication: NSRunningApplication?
     private var hasAppliedPreferredSize = false
+    private var memoryReliefWorkItem: DispatchWorkItem?
 
     func updateAccessibilityStatus(_ trusted: Bool) {
         if Thread.isMainThread {
@@ -1587,9 +1303,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             return
         }
 
+        rememberCurrentExternalApplication()
+
         menuBarManager = MenuBarManager(history: history, appDelegate: self)
-        shortcutHandler = GlobalShortcutHandler(history: history, appDelegate: self)
-        popupWindowManager = PopupWindowManager(history: history)
+        shortcutHandler = GlobalShortcutHandler(appDelegate: self)
 
         // Setup window delegate for all windows - do this after a small delay to ensure windows are ready
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
@@ -1598,8 +1315,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        memoryReliefWorkItem?.cancel()
         // Persist the latest coalesced snapshot before an orderly quit.
         history?.flushPersistence()
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        // Accessibility changes are applied when the user returns from System
+        // Settings, with no perpetual permission polling while EchoCopy idles.
+        shortcutHandler?.refreshConfiguration()
+    }
+
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows flag: Bool
+    ) -> Bool {
+        if !flag {
+            showMainWindow()
+        }
+        return true
     }
 
     func applyWindowBehavior(to window: NSWindow) {
@@ -1623,22 +1357,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             }
         }
 
-        // Add global monitor for clicks outside the window
-        if globalClickMonitor == nil {
-            globalClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
-                guard let self = self, let window = self.mainWindow, window.isVisible else { return }
-                
-                let mouseLocation = NSEvent.mouseLocation
-                if !window.frame.contains(mouseLocation) {
-                    window.orderOut(nil)
-                }
-            }
-        }
     }
 
     private func configureWindow(_ window: NSWindow) {
         if windowDelegate == nil {
-            windowDelegate = MenuBarWindowDelegate()
+            let delegate = MenuBarWindowDelegate()
+            delegate.onWindowClosed = { [weak self] closedWindow in
+                guard let self else { return }
+                if self.mainWindow === closedWindow {
+                    self.mainWindow = nil
+                }
+                self.releaseClosedWindowResources()
+            }
+            windowDelegate = delegate
         }
 
         // Configure window to behave like an NSPanel (menu bar window)
@@ -1669,14 +1400,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
         // Remove Dock minimization entirely
         window.styleMask.remove(.miniaturizable)
+        window.isReleasedWhenClosed = true
 
         // As a fallback, observe miniaturize attempts and immediately hide instead
         let windowID = ObjectIdentifier(window)
         if windowMiniaturizeObservers[windowID] == nil {
             let observer = NotificationCenter.default.addObserver(forName: NSWindow.willMiniaturizeNotification, object: window, queue: .main) { [weak self] note in
-                if let w = note.object as? NSWindow {
-                    w.orderOut(nil)
-                    self?.mainWindow = w
+                Task { @MainActor [weak self] in
+                    if let w = note.object as? NSWindow {
+                        w.orderOut(nil)
+                        self?.mainWindow = w
+                    }
                 }
             }
             windowMiniaturizeObservers[windowID] = observer
@@ -1686,12 +1420,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         self.mainWindow = window
 
         window.minSize = NSSize(width: 320, height: 400)
+        window.maxSize = NSSize(width: 520, height: 860)
 
         if !hasAppliedPreferredSize {
-            let preferredContentSize = NSSize(width: 350, height: 480)
+            let preferredContentSize = NSSize(width: 400, height: 560)
             window.setContentSize(preferredContentSize)
             hasAppliedPreferredSize = true
         }
+    }
+
+    private func releaseClosedWindowResources() {
+        ClipboardThumbnailCache.shared.removeAll()
+
+        memoryReliefWorkItem?.cancel()
+        let workItem = DispatchWorkItem {
+            // Large image/history buffers are temporary. Once SwiftUI releases
+            // the closed window's view state, return its unused pages
+            // to macOS instead of retaining the allocator's high-water mark.
+            malloc_zone_pressure_relief(nil, 0)
+        }
+        memoryReliefWorkItem = workItem
+        DispatchQueue.global(qos: .utility).asyncAfter(
+            deadline: .now() + 0.5,
+            execute: workItem
+        )
     }
 
     @objc private func handleMiniaturizeButton(_ sender: Any?) {
@@ -1709,6 +1461,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     @objc func showMainWindow() {
+        rememberCurrentExternalApplication()
+
         if let window = mainWindow {
             configureWindow(window)
             window.makeKeyAndOrderFront(nil)
@@ -1716,17 +1470,45 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             return
         }
 
-        // Fallback: find the first non-panel window.
-        if let window = NSApp.windows.first(where: { !$0.isKind(of: NSPanel.self) }) {
-            configureWindow(window)
-            window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            self.mainWindow = window
-        }
+        guard let history else { return }
+
+        let rootView = ContentView()
+            .environmentObject(history)
+            .environmentObject(self)
+        let hostingController = NSHostingController(rootView: rootView)
+        let window = MenuBarWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 560),
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentViewController = hostingController
+        window.title = "EchoCopy"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.center()
+        configureWindow(window)
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
-    @objc func showPopupWindow() {
-        popupWindowManager?.showPopup()
+    func pasteHistoryItem(_ item: ClipboardItem) {
+        rememberCurrentExternalApplication()
+        guard PasteboardWriter.write(item) else { return }
+        mainWindow?.orderOut(nil)
+        PasteExecutor.pastePreparedClipboard(into: lastExternalApplication)
+    }
+
+    func prepareForHistoryInteraction() {
+        rememberCurrentExternalApplication()
+    }
+
+    private func rememberCurrentExternalApplication() {
+        guard let currentApplication = NSWorkspace.shared.frontmostApplication,
+              currentApplication.bundleIdentifier != Bundle.main.bundleIdentifier else {
+            return
+        }
+        lastExternalApplication = currentApplication
     }
 
     @objc func showSettings() {
@@ -1745,14 +1527,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     deinit {
+        memoryReliefWorkItem?.cancel()
         // Clean up event monitors
         if let monitor = localEventMonitor {
             NSEvent.removeMonitor(monitor)
         }
-        if let monitor = globalClickMonitor {
-            NSEvent.removeMonitor(monitor)
-        }
-
         // Clean up notification observers
         for (_, observer) in windowMiniaturizeObservers {
             NotificationCenter.default.removeObserver(observer)
@@ -1765,7 +1544,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 struct ContentView: View {
     @EnvironmentObject var history: ClipboardHistory
     @EnvironmentObject var appDelegate: AppDelegate
-    @Environment(\.openWindow) private var openWindow
     @State private var searchText = ""
 
     var filteredItems: [ClipboardItem] {
@@ -1803,7 +1581,7 @@ struct ContentView: View {
                         Spacer()
                         
                         Button {
-                            openWindow(id: "settings")
+                            appDelegate.showSettings()
                         } label: {
                             Image(systemName: "slider.horizontal.3")
                                 .font(.system(size: 11, weight: .bold))
@@ -1905,14 +1683,6 @@ struct ContentView: View {
                                 .foregroundColor(.secondary)
                         }
 
-                        Text("Press ⌃V or ⇧⌘V to open quick paste")
-                            .font(.system(size: 11, weight: .medium))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
-                            .background(Color.primary.opacity(0.05))
-                            .cornerRadius(6)
-                            .foregroundColor(.secondary)
-                        
                         Spacer()
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1942,7 +1712,11 @@ struct ContentView: View {
                                 SectionHeader(title: "Pinned")
                                     .padding(.horizontal, 12)
                                 ForEach(pinnedItems) { item in
-                                    ClipboardItemRow(item: item, history: history)
+                                    ClipboardItemRow(
+                                        item: item,
+                                        history: history,
+                                        onPaste: appDelegate.pasteHistoryItem
+                                    )
                                 }
                                 .padding(.horizontal, 4)
                                 
@@ -1954,7 +1728,11 @@ struct ContentView: View {
                             }
 
                             ForEach(unpinnedItems) { item in
-                                ClipboardItemRow(item: item, history: history)
+                                ClipboardItemRow(
+                                    item: item,
+                                    history: history,
+                                    onPaste: appDelegate.pasteHistoryItem
+                                )
                             }
                             .padding(.horizontal, 4)
                         }
@@ -2231,6 +2009,7 @@ struct WindowAccessor: NSViewRepresentable {
 struct ClipboardImagePreview: View {
     let itemID: UUID
     let base64Content: String
+    var height: CGFloat = 72
 
     @State private var thumbnail: CGImage?
     @State private var hasRequestedThumbnail = false
@@ -2250,7 +2029,7 @@ struct ClipboardImagePreview: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .frame(height: 140)
+        .frame(height: height)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -2268,12 +2047,19 @@ struct ClipboardImagePreview: View {
                 thumbnail = image
             }
         }
+        .onDisappear {
+            // Visible rows may retain their SwiftUI state after leaving a lazy
+            // stack. Release that reference and let the bounded cache own it.
+            thumbnail = nil
+            hasRequestedThumbnail = false
+        }
     }
 }
 
 struct ClipboardItemRow: View {
     let item: ClipboardItem
     let history: ClipboardHistory
+    let onPaste: (ClipboardItem) -> Void
     @State private var isHovered = false
 
     var contentIcon: String {
@@ -2295,13 +2081,7 @@ struct ClipboardItemRow: View {
     }
 
     var contentPreview: String {
-        switch item.contentType {
-        case .text:
-            return item.content.trimmingCharacters(in: .whitespacesAndNewlines)
-        case .image: return item.filename ?? "Image"
-        case .url: return item.content
-        case .file: return item.filename ?? "[File]"
-        }
+        item.listPreview
     }
 
     var contentTypeLabel: String {
@@ -2316,62 +2096,52 @@ struct ClipboardItemRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if item.contentType == .image {
-                // Large Image Layout
-                VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
                     ClipboardImagePreview(
                         itemID: item.id,
-                        base64Content: item.content
+                        base64Content: item.content,
+                        height: 72
                     )
-                    
-                    HStack {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(item.filename ?? "Screenshot")
-                                .font(.system(size: 11, weight: .bold, design: .rounded))
-                                .foregroundColor(.primary)
-                            
-                            HStack(spacing: 6) {
-                                Text(item.timestamp.formatted(date: .omitted, time: .shortened))
-                                    .font(.system(size: 9, weight: .bold))
-                                    .foregroundColor(.secondary.opacity(0.6))
-                                
-                                if item.isPinned {
-                                    Image(systemName: "pin.fill")
-                                        .font(.system(size: 8))
-                                        .foregroundColor(.orange)
-                                }
-                            }
-                        }
-                        
-                        Spacer()
-                        
-                        // Action buttons for image
-                        if isHovered || item.isPinned {
-                            HStack(spacing: 4) {
-                                Button(action: { pasteItem() }) {
-                                    Image(systemName: "doc.on.doc.fill")
-                                        .font(.system(size: 10, weight: .bold))
-                                        .foregroundColor(.blue)
-                                        .frame(width: 26, height: 26)
-                                        .background(Color.blue.opacity(0.1))
-                                        .clipShape(Circle())
-                                }
-                                .buttonStyle(.plain)
-                                .opacity(isHovered ? 1 : 0)
+                    .frame(width: 112)
 
-                                Button(action: { history.togglePin(for: item) }) {
-                                    Image(systemName: item.isPinned ? "pin.fill" : "pin")
-                                        .font(.system(size: 10, weight: .bold))
-                                        .foregroundColor(item.isPinned ? .orange : .secondary)
-                                        .frame(width: 26, height: 26)
-                                        .background(item.isPinned ? Color.orange.opacity(0.1) : Color.primary.opacity(0.05))
-                                        .clipShape(Circle())
-                                }
-                                .buttonStyle(.plain)
-                            }
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(item.filename ?? "Screenshot")
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+
+                        Text("Image · \(item.timestamp.formatted(date: .omitted, time: .shortened))")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(.secondary)
+
+                        if item.isPinned {
+                            Label("Pinned", systemImage: "pin.fill")
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundColor(.orange)
                         }
                     }
+
+                    Spacer(minLength: 4)
+
+                    if isHovered || item.isPinned {
+                        Button(action: { history.togglePin(for: item) }) {
+                            Image(systemName: item.isPinned ? "pin.fill" : "pin")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(item.isPinned ? .orange : .secondary)
+                                .frame(width: 26, height: 26)
+                                .background(
+                                    item.isPinned
+                                        ? Color.orange.opacity(0.1)
+                                        : Color.primary.opacity(0.05)
+                                )
+                                .clipShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .help(item.isPinned ? "Unpin" : "Pin")
+                    }
                 }
-                .padding(10)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
             } else {
                 // Compact Text/URL/File Layout
                 HStack(spacing: 10) {
@@ -2408,29 +2178,20 @@ struct ClipboardItemRow: View {
                     Spacer(minLength: 4)
 
                     if isHovered || item.isPinned {
-                        HStack(spacing: 2) {
-                            Button(action: { pasteItem() }) {
-                                Image(systemName: "doc.on.doc.fill")
-                                    .font(.system(size: 9, weight: .bold))
-                                    .foregroundColor(.blue)
-                                    .frame(width: 22, height: 22)
-                                    .background(Color.blue.opacity(0.1))
-                                    .clipShape(Circle())
-                            }
-                            .buttonStyle(.plain)
-                            .opacity(isHovered ? 1 : 0)
-
-                            Button(action: { history.togglePin(for: item) }) {
-                                Image(systemName: item.isPinned ? "pin.fill" : "pin")
-                                    .font(.system(size: 9, weight: .bold))
-                                    .foregroundColor(item.isPinned ? .orange : .secondary)
-                                    .frame(width: 22, height: 22)
-                                    .background(item.isPinned ? Color.orange.opacity(0.1) : Color.primary.opacity(0.05))
-                                    .clipShape(Circle())
-                            }
-                            .buttonStyle(.plain)
+                        Button(action: { history.togglePin(for: item) }) {
+                            Image(systemName: item.isPinned ? "pin.fill" : "pin")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundColor(item.isPinned ? .orange : .secondary)
+                                .frame(width: 24, height: 24)
+                                .background(
+                                    item.isPinned
+                                        ? Color.orange.opacity(0.1)
+                                        : Color.primary.opacity(0.05)
+                                )
+                                .clipShape(Circle())
                         }
-                        .transition(.opacity)
+                        .buttonStyle(.plain)
+                        .help(item.isPinned ? "Unpin" : "Pin")
                     }
                 }
                 .padding(.horizontal, 8)
@@ -2448,9 +2209,25 @@ struct ClipboardItemRow: View {
             }
         }
         .contentShape(Rectangle())
+        .onTapGesture {
+            pasteItem()
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(contentTypeLabel): \(contentPreview)")
+        .accessibilityHint("Pastes this item into the previous app")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction {
+            pasteItem()
+        }
         .contextMenu {
             Button {
                 pasteItem()
+            } label: {
+                Label("Paste into Previous App", systemImage: "doc.on.clipboard")
+            }
+
+            Button {
+                PasteboardWriter.write(item)
             } label: {
                 Label("Copy to Clipboard", systemImage: "doc.on.doc")
             }
@@ -2472,7 +2249,7 @@ struct ClipboardItemRow: View {
     }
 
     private func pasteItem() {
-        PasteboardWriter.write(item)
+        onPaste(item)
     }
 }
 
@@ -2483,23 +2260,15 @@ struct SettingsView: View {
     @EnvironmentObject var appDelegate: AppDelegate
     @StateObject private var updateChecker = UpdateChecker()
     @AppStorage(ScreenshotCaptureCoordinator.automaticClipboardPreferenceKey)
-    private var automaticallyCopyScreenshots = true
-    @State private var newAppBundleID = ""
-    @State private var showInvalidWarning = false
+    private var automaticallyCopyScreenshots = false
     @State private var selectedTab = 0
 
-    private var trimmedBundleID: String {
-        newAppBundleID.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    var isValidBundleID: Bool {
-        return !trimmedBundleID.isEmpty &&
-               trimmedBundleID.contains(".") &&
-               trimmedBundleID != Bundle.main.bundleIdentifier
-    }
-
     private var currentVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.4"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "Unknown"
+    }
+
+    private var excludedAppNames: [String] {
+        Array(Set(history.excludedApps.map(appName(from:)))).sorted()
     }
 
     var body: some View {
@@ -2516,7 +2285,7 @@ struct SettingsView: View {
                         }
 
                         Toggle(
-                            "Automatically copy screenshots to the clipboard",
+                            "Add standard screenshots to EchoCopy",
                             isOn: $automaticallyCopyScreenshots
                         )
 
@@ -2529,7 +2298,7 @@ struct SettingsView: View {
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
 
-                        Text("Uses EchoCopy's existing Accessibility access; no Desktop-folder access is requested.")
+                        Text("Off by default. Uses EchoCopy's existing Accessibility access; no Desktop-folder access is requested.")
                             .font(.system(size: 11))
                             .foregroundColor(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -2656,19 +2425,24 @@ struct SettingsView: View {
             // List of excluded apps
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(Array(history.excludedApps).sorted(), id: \.self) { bundleID in
+                    ForEach(excludedAppNames, id: \.self) { name in
                         HStack {
                             Image(systemName: "shield.fill")
                                 .foregroundColor(.blue)
                                 .font(.system(size: 12))
 
-                            Text(appName(from: bundleID))
+                            Text(name)
                                 .font(.system(size: 13))
 
                             Spacer()
 
                             Button(action: {
-                                history.removeExcludedApp(bundleID)
+                                let matchingBundleIDs = history.excludedApps.filter {
+                                    appName(from: $0) == name
+                                }
+                                for bundleID in matchingBundleIDs {
+                                    history.removeExcludedApp(bundleID)
+                                }
                             }) {
                                 Image(systemName: "minus.circle.fill")
                                     .foregroundColor(.red)
@@ -2691,45 +2465,23 @@ struct SettingsView: View {
                     .font(.system(size: 14, weight: .semibold))
 
                 HStack {
-                    TextField("Bundle ID (e.g., com.apple.Safari)", text: $newAppBundleID)
-                        .textFieldStyle(.roundedBorder)
+                    Button("Choose Application…") {
+                        chooseApplicationToExclude()
+                    }
 
-                    Button("Add") {
-                        if isValidBundleID {
-                            history.addExcludedApp(trimmedBundleID)
-                            newAppBundleID = ""
-                            showInvalidWarning = false
-                        } else {
-                            showInvalidWarning = true
+                    if let currentApp = NSWorkspace.shared.frontmostApplication,
+                       let bundleID = currentApp.bundleIdentifier,
+                       bundleID != Bundle.main.bundleIdentifier,
+                       !history.excludedApps.contains(bundleID) {
+                        Button("Exclude \(currentApp.localizedName ?? "Current App")") {
+                            history.addExcludedApp(bundleID)
                         }
                     }
-                    .disabled(trimmedBundleID.isEmpty)
                 }
 
-                if showInvalidWarning && !isValidBundleID && !trimmedBundleID.isEmpty {
-                    Text("Invalid bundle ID format. Must contain '.' (e.g., com.company.app)")
-                        .font(.system(size: 11))
-                        .foregroundColor(.red)
-                }
-
-                Text("Tip: Copy from the currently active app")
+                Text("Choose an installed app—no bundle ID lookup required.")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
-
-                if let currentApp = NSWorkspace.shared.frontmostApplication,
-                   let bundleID = currentApp.bundleIdentifier,
-                   bundleID != Bundle.main.bundleIdentifier,
-                   !history.excludedApps.contains(bundleID) {
-                    Button("Add Current App: \(currentApp.localizedName ?? bundleID)") {
-                        history.addExcludedApp(bundleID)
-                    }
-                    .font(.system(size: 12))
-                } else if let currentApp = NSWorkspace.shared.frontmostApplication,
-                          currentApp.bundleIdentifier == Bundle.main.bundleIdentifier {
-                    Text("Cannot exclude EchoCopy itself")
-                        .font(.system(size: 11))
-                        .foregroundColor(.orange)
-                }
             }
 
             Spacer()
@@ -2740,7 +2492,24 @@ struct SettingsView: View {
             }
             .tag(2)
         }
-        .frame(width: 500, height: 450)
+        .frame(width: 560, height: 520)
+    }
+
+    private func chooseApplicationToExclude() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose an app to exclude"
+        panel.prompt = "Exclude App"
+        panel.allowedContentTypes = [.application]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+
+        guard panel.runModal() == .OK,
+              let appURL = panel.url,
+              let bundleID = Bundle(url: appURL)?.bundleIdentifier else {
+            return
+        }
+        history.addExcludedApp(bundleID)
     }
 
     private func appName(from bundleID: String) -> String {
@@ -2777,7 +2546,7 @@ class UpdateChecker: ObservableObject {
     private let releasePageURL = URL(string: "https://github.com/conman777/EchoCopy/releases/latest")!
 
     private var currentVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.4"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
     }
 
     func checkForUpdates() {
@@ -2836,7 +2605,10 @@ class UpdateChecker: ObservableObject {
                         let latestVersion = tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName
                         self.latestVersion = latestVersion
 
-                        self.updateAvailable = self.isNewerVersion(latestVersion, than: self.currentVersion)
+                        self.updateAvailable = UpdateVersionPolicy.updateAvailable(
+                            latest: latestVersion,
+                            current: self.currentVersion
+                        )
                         self.errorMessage = nil
                     } else {
                         self.errorMessage = "Could not parse release info"
@@ -2846,20 +2618,6 @@ class UpdateChecker: ObservableObject {
                 }
             }
         }.resume()
-    }
-
-    private func isNewerVersion(_ new: String, than current: String) -> Bool {
-        let newParts = new.split(separator: ".").compactMap { Int($0) }
-        let currentParts = current.split(separator: ".").compactMap { Int($0) }
-
-        for i in 0..<max(newParts.count, currentParts.count) {
-            let newPart = i < newParts.count ? newParts[i] : 0
-            let currentPart = i < currentParts.count ? currentParts[i] : 0
-
-            if newPart > currentPart { return true }
-            if newPart < currentPart { return false }
-        }
-        return false
     }
 
     func openReleasePage() {
@@ -2876,19 +2634,6 @@ struct EchoCopyApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        WindowGroup {
-            ContentView()
-                .environmentObject(history)
-                .environmentObject(appDelegate)
-        }
-        .windowStyle(.hiddenTitleBar)
-
-        Window("Settings", id: "settings") {
-            SettingsView()
-                .environmentObject(history)
-                .environmentObject(appDelegate)
-        }
-
         Settings {
             SettingsView()
                 .environmentObject(history)

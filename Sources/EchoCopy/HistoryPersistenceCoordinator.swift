@@ -102,7 +102,22 @@ final class HistoryPersistenceCoordinator {
 
     private func itemsWithinStorageBudget(_ items: [ClipboardItem]) throws -> [ClipboardItem] {
         let encoder = JSONEncoder()
-        var sizedItems = try items.map {
+        var boundedItems = items
+
+        while boundedItems.count > maximumItems {
+            let removalIndex = boundedItems.lastIndex(where: { !$0.isPinned })
+                ?? boundedItems.count - 1
+            boundedItems.remove(at: removalIndex)
+        }
+
+        // The common path is a single array encoding. Previously every item
+        // was encoded separately on every save even when the history was well
+        // below its byte budget.
+        if try encoder.encode(boundedItems).count <= maximumPlaintextBytes {
+            return boundedItems
+        }
+
+        var sizedItems = try boundedItems.map {
             SizedItem(item: $0, encodedByteCount: try encoder.encode($0).count)
         }
 
@@ -124,7 +139,7 @@ final class HistoryPersistenceCoordinator {
             }
         }
 
-        var boundedItems = sizedItems.map(\.item)
+        boundedItems = sizedItems.map(\.item)
 
         // Verify the estimate against JSONEncoder itself. This normally encodes
         // once; the loop is a defensive fallback if array encoding adds more

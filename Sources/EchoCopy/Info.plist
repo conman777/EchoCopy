@@ -13,9 +13,9 @@
     <key>CFBundleIdentifier</key>
     <string>com.yourcompany.echocopy</string>
     <key>CFBundleVersion</key>
-    <string>5</string>
+    <string>7</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.4</string>
+    <string>1.0.7</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>
@@ -29,6 +29,6 @@
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
     <key>NSAccessibilityUsageDescription</key>
-    <string>EchoCopy needs accessibility access to capture its global Control+V and Command+Shift+V shortcuts.</string>
+    <string>EchoCopy needs accessibility access to paste a selected history item into the app you were using and for optional screenshot capture.</string>
 </dict>
 </plist>

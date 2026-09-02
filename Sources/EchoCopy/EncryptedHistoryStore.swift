@@ -265,6 +265,7 @@ struct EncryptedHistoryStore {
     private let recoveryBackupKey: String
     private let recoveryBackupEncryptionVersionKey: String
     private let keyProvider: any HistoryKeyProviding
+    private let payloadFileURL: URL?
 
     init(
         defaults: UserDefaults,
@@ -274,6 +275,7 @@ struct EncryptedHistoryStore {
         keychainRepairRequiredKey: String? = nil,
         recoveryBackupKey: String? = nil,
         recoveryBackupEncryptionVersionKey: String? = nil,
+        payloadFileURL: URL? = nil,
         keyProvider: any HistoryKeyProviding
     ) {
         self.defaults = defaults
@@ -287,6 +289,7 @@ struct EncryptedHistoryStore {
             ?? "\(storageKey).recoveryBackup"
         self.recoveryBackupEncryptionVersionKey = recoveryBackupEncryptionVersionKey
             ?? "\(encryptionVersionKey).recoveryBackup"
+        self.payloadFileURL = payloadFileURL
         self.keyProvider = keyProvider
     }
 
@@ -296,7 +299,7 @@ struct EncryptedHistoryStore {
     /// version-2 save or load records that the fresh app-owned item is safe for
     /// later noninteractive startup reads.
     var requiresUserInitiatedKeychainRepair: Bool {
-        guard defaults.data(forKey: storageKey) != nil else { return false }
+        guard hasStoredPayload else { return false }
 
         return defaults.bool(forKey: keychainRepairRequiredKey)
             || defaults.integer(forKey: keychainAccessVersionKey)
@@ -313,7 +316,7 @@ struct EncryptedHistoryStore {
     /// usable without consulting any legacy Keychain ACL.
     @discardableResult
     func archiveLegacyHistoryAndStartFresh() -> Bool {
-        guard let payload = defaults.data(forKey: storageKey) else {
+        guard let payload = try? readStoredPayload() else {
             defaults.removeObject(forKey: keychainRepairRequiredKey)
             defaults.removeObject(forKey: keychainAccessVersionKey)
             return false
@@ -328,7 +331,7 @@ struct EncryptedHistoryStore {
             )
         }
 
-        defaults.removeObject(forKey: storageKey)
+        removeStoredPayload()
         defaults.set(Self.currentEncryptionVersion, forKey: encryptionVersionKey)
         defaults.removeObject(forKey: keychainRepairRequiredKey)
         defaults.removeObject(forKey: keychainAccessVersionKey)
@@ -344,10 +347,18 @@ struct EncryptedHistoryStore {
     }
 
     static func live() -> EncryptedHistoryStore {
-        EncryptedHistoryStore(
+        let applicationSupportURL = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first?
+            .appendingPathComponent("EchoCopy", isDirectory: true)
+            .appendingPathComponent("clipboard-history-v1.enc", isDirectory: false)
+
+        return EncryptedHistoryStore(
             defaults: .standard,
             storageKey: "clipboardHistory",
             encryptionVersionKey: "clipboardHistoryEncryptionVersion",
+            payloadFileURL: applicationSupportURL,
             keyProvider: KeychainHistoryKeyProvider()
         )
     }
@@ -396,7 +407,7 @@ struct EncryptedHistoryStore {
             throw EncryptedHistoryStoreError.oversizedPayload
         }
 
-        defaults.set(payload, forKey: storageKey)
+        try writeStoredPayload(payload)
         defaults.set(Self.currentEncryptionVersion, forKey: encryptionVersionKey)
         recordKeychainAccessSuccess()
     }
@@ -405,7 +416,7 @@ struct EncryptedHistoryStore {
         maximumPlaintextBytes: Int,
         allowKeychainInteraction: Bool = false
     ) throws -> [ClipboardItem]? {
-        guard let payload = defaults.data(forKey: storageKey) else {
+        guard let payload = try readStoredPayload() else {
             return nil
         }
 
@@ -501,7 +512,71 @@ struct EncryptedHistoryStore {
     }
 
     private func discardStoredPayloadAndRequireEncryption() {
-        defaults.removeObject(forKey: storageKey)
+        removeStoredPayload()
         defaults.set(Self.currentEncryptionVersion, forKey: encryptionVersionKey)
+    }
+
+    private var hasStoredPayload: Bool {
+        if let payloadFileURL,
+           FileManager.default.fileExists(atPath: payloadFileURL.path) {
+            return true
+        }
+        return defaults.data(forKey: storageKey) != nil
+    }
+
+    /// The live app keeps the potentially large encrypted blob out of
+    /// UserDefaults so CFPreferences does not retain a second in-memory copy.
+    /// Test stores and legacy callers can continue using UserDefaults by
+    /// omitting `payloadFileURL`.
+    private func readStoredPayload() throws -> Data? {
+        guard let payloadFileURL else {
+            return defaults.data(forKey: storageKey)
+        }
+
+        if FileManager.default.fileExists(atPath: payloadFileURL.path) {
+            return try Data(contentsOf: payloadFileURL, options: .mappedIfSafe)
+        }
+
+        guard let legacyPayload = defaults.data(forKey: storageKey) else {
+            return nil
+        }
+
+        // Migrate the already-encrypted payload atomically. Remove the old
+        // preferences value only after the file is safely in place.
+        try writePayloadFile(legacyPayload, to: payloadFileURL)
+        defaults.removeObject(forKey: storageKey)
+        return legacyPayload
+    }
+
+    private func writeStoredPayload(_ payload: Data) throws {
+        guard let payloadFileURL else {
+            defaults.set(payload, forKey: storageKey)
+            return
+        }
+
+        try writePayloadFile(payload, to: payloadFileURL)
+        defaults.removeObject(forKey: storageKey)
+    }
+
+    private func writePayloadFile(_ payload: Data, to fileURL: URL) throws {
+        let directoryURL = fileURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(
+            at: directoryURL,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try payload.write(to: fileURL, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: fileURL.path
+        )
+    }
+
+    private func removeStoredPayload() {
+        if let payloadFileURL,
+           FileManager.default.fileExists(atPath: payloadFileURL.path) {
+            try? FileManager.default.removeItem(at: payloadFileURL)
+        }
+        defaults.removeObject(forKey: storageKey)
     }
 }

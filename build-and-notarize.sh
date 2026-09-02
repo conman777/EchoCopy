@@ -8,7 +8,12 @@ echo "🏗️  Building EchoCopy for distribution..."
 DEVELOPER_ID="${DEVELOPER_ID:-}"
 BUNDLE_ID="${BUNDLE_ID:-com.yourcompany.echocopy}"
 APP_NAME="EchoCopy"
-VERSION="${VERSION:-1.0.4}"
+SOURCE_INFO_PLIST="Sources/EchoCopy/Info.plist"
+SOURCE_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${SOURCE_INFO_PLIST}")"
+SOURCE_BUILD_NUMBER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${SOURCE_INFO_PLIST}")"
+VERSION="${VERSION:-${SOURCE_VERSION}}"
+BUILD_NUMBER="${BUILD_NUMBER:-${SOURCE_BUILD_NUMBER}}"
+RELEASE_TAG="${RELEASE_TAG:-}"
 
 APP_BUNDLE="${APP_NAME}.app"
 DMG_NAME="${APP_NAME}-${VERSION}.dmg"
@@ -17,6 +22,23 @@ if [[ -z "$DEVELOPER_ID" || "$DEVELOPER_ID" == *"Your Name"* || "$DEVELOPER_ID" 
   echo "Set DEVELOPER_ID to an installed Developer ID Application certificate before creating a release." >&2
   exit 1
 fi
+
+if [[ -z "${RELEASE_TAG}" ]]; then
+  echo "Set RELEASE_TAG=v${VERSION} so the release tag can be verified against the app bundle." >&2
+  exit 1
+fi
+
+if [[ "${VERSION}" != "${SOURCE_VERSION}" ]]; then
+  echo "VERSION=${VERSION} does not match ${SOURCE_INFO_PLIST} (${SOURCE_VERSION}). Update the source plist first." >&2
+  exit 1
+fi
+
+if [[ "${BUILD_NUMBER}" != "${SOURCE_BUILD_NUMBER}" ]]; then
+  echo "BUILD_NUMBER=${BUILD_NUMBER} does not match ${SOURCE_INFO_PLIST} (${SOURCE_BUILD_NUMBER}). Update the source plist first." >&2
+  exit 1
+fi
+
+bash scripts/verify-release-version.sh "${SOURCE_INFO_PLIST}" "${RELEASE_TAG}"
 
 if [[ "$BUNDLE_ID" != *.* ]]; then
   echo "BUNDLE_ID must be a stable reverse-DNS identifier." >&2
@@ -47,12 +69,13 @@ mkdir -p "${APP_BUNDLE}/Contents/Resources"
 cp "${BUILD_DIR}/EchoCopy" "${APP_BUNDLE}/Contents/MacOS/"
 
 # Copy Info.plist
-cp "Sources/EchoCopy/Info.plist" "${APP_BUNDLE}/Contents/"
+cp "${SOURCE_INFO_PLIST}" "${APP_BUNDLE}/Contents/"
 
 # Update Info.plist with release values
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "${APP_BUNDLE}/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "${APP_BUNDLE}/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "${APP_BUNDLE}/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "${APP_BUNDLE}/Contents/Info.plist"
+bash scripts/verify-release-version.sh "${APP_BUNDLE}/Contents/Info.plist" "${RELEASE_TAG}"
 
 # Code sign with hardened runtime
 echo "✍️  Code signing..."

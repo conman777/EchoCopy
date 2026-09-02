@@ -4,6 +4,52 @@ import XCTest
 @testable import EchoCopy
 
 final class EncryptedHistoryStoreTests: XCTestCase {
+    func testLiveStyleFileStorageMigratesEncryptedDefaultsPayload() throws {
+        let context = makeContext()
+        defer { context.cleanup() }
+
+        let item = ClipboardItem(content: "file-backed history", contentType: .text)
+        try context.store.save(
+            [item],
+            maximumPlaintextBytes: ClipboardPolicy.maxHistoryBytes
+        )
+        let encryptedDefaultsPayload = try XCTUnwrap(
+            context.defaults.data(forKey: context.storageKey)
+        )
+
+        let directoryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("EchoCopyFileStoreTests-\(UUID().uuidString)")
+        let payloadFileURL = directoryURL.appendingPathComponent("history.enc")
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+
+        let fileStore = EncryptedHistoryStore(
+            defaults: context.defaults,
+            storageKey: context.storageKey,
+            encryptionVersionKey: context.versionKey,
+            payloadFileURL: payloadFileURL,
+            keyProvider: context.keyProvider
+        )
+
+        let loaded = try XCTUnwrap(
+            fileStore.load(maximumPlaintextBytes: ClipboardPolicy.maxHistoryBytes)
+        )
+
+        XCTAssertEqual(loaded.map(\.id), [item.id])
+        XCTAssertNil(context.defaults.data(forKey: context.storageKey))
+        XCTAssertEqual(try Data(contentsOf: payloadFileURL), encryptedDefaultsPayload)
+
+        try fileStore.save(
+            [ClipboardItem(content: "updated", contentType: .text)],
+            maximumPlaintextBytes: ClipboardPolicy.maxHistoryBytes
+        )
+        XCTAssertNil(context.defaults.data(forKey: context.storageKey))
+        XCTAssertTrue(
+            try Data(contentsOf: payloadFileURL).starts(
+                with: EncryptedHistoryStore.envelopeMagic
+            )
+        )
+    }
+
     func testEncryptedHistoryRoundTripsWithoutPersistingPlaintext() throws {
         let context = makeContext()
         defer { context.cleanup() }
@@ -253,6 +299,7 @@ final class EncryptedHistoryStoreTests: XCTestCase {
             defaults: defaults,
             storageKey: storageKey,
             versionKey: versionKey,
+            keyProvider: keyProvider,
             store: store
         )
     }
@@ -306,6 +353,7 @@ private struct TestStoreContext {
     let defaults: UserDefaults
     let storageKey: String
     let versionKey: String
+    let keyProvider: TestHistoryKeyProvider
     let store: EncryptedHistoryStore
 
     func cleanup() {

@@ -6,6 +6,27 @@ import XCTest
 @testable import EchoCopy
 
 final class ScreenshotCaptureCoordinatorTests: XCTestCase {
+    func testEventTapRunsOnlyWhenScreenshotCaptureNeedsIt() {
+        XCTAssertFalse(
+            ScreenshotShortcutRuntimePolicy.shouldInstallEventTap(
+                automaticCaptureEnabled: false,
+                accessibilityTrusted: true
+            )
+        )
+        XCTAssertFalse(
+            ScreenshotShortcutRuntimePolicy.shouldInstallEventTap(
+                automaticCaptureEnabled: true,
+                accessibilityTrusted: false
+            )
+        )
+        XCTAssertTrue(
+            ScreenshotShortcutRuntimePolicy.shouldInstallEventTap(
+                automaticCaptureEnabled: true,
+                accessibilityTrusted: true
+            )
+        )
+    }
+
     func testStandardScreenshotShortcutRecognition() {
         let commandShift: CGEventFlags = [.maskCommand, .maskShift]
 
@@ -143,6 +164,10 @@ final class ScreenshotCaptureCoordinatorTests: XCTestCase {
 
     func testPendingScreenshotIsConsumedExactlyOnce() throws {
         let defaults = makeUserDefaults()
+        defaults.set(
+            true,
+            forKey: ScreenshotCaptureCoordinator.automaticClipboardPreferenceKey
+        )
         let destination = URL(fileURLWithPath: "/tmp/screenshots", isDirectory: true)
         let now = Date(timeIntervalSince1970: 1_000)
         let coordinator = ScreenshotCaptureCoordinator(
@@ -188,6 +213,16 @@ final class ScreenshotCaptureCoordinatorTests: XCTestCase {
 
     func testDisabledOrNonFileScreenshotTargetIsNotRedirected() {
         let defaults = makeUserDefaults()
+        let defaultCoordinator = ScreenshotCaptureCoordinator(
+            userDefaults: defaults,
+            screenshotTargetProvider: { "file" }
+        )
+        XCTAssertFalse(
+            defaultCoordinator.beginAutomaticClipboardCapture(
+                startingPasteboardChangeCount: 1
+            )
+        )
+
         defaults.set(
             false,
             forKey: ScreenshotCaptureCoordinator.automaticClipboardPreferenceKey
@@ -219,6 +254,10 @@ final class ScreenshotCaptureCoordinatorTests: XCTestCase {
 
     func testPendingScreenshotExpires() {
         let defaults = makeUserDefaults()
+        defaults.set(
+            true,
+            forKey: ScreenshotCaptureCoordinator.automaticClipboardPreferenceKey
+        )
         let now = Date(timeIntervalSince1970: 1_000)
         let coordinator = ScreenshotCaptureCoordinator(
             userDefaults: defaults,

@@ -2,7 +2,7 @@
 
 ## ⚠️ Important: Choose Your Distribution Method
 
-EchoCopy uses **Accessibility Permissions** for global keyboard shortcuts (Control+V and Command+Shift+V). This makes it **unsuitable for Mac App Store distribution** because:
+EchoCopy uses **Accessibility Permissions** for one-click paste and optional screenshot capture. This makes it **unsuitable for Mac App Store distribution** because:
 - App Store apps must be sandboxed
 - Sandboxed apps cannot request accessibility permissions
 - Apple typically rejects clipboard managers
@@ -47,9 +47,15 @@ Provide the release configuration through the environment when invoking `build-a
 ```bash
 export DEVELOPER_ID="Developer ID Application: Your Name (YOUR_TEAM_ID)"
 export BUNDLE_ID="com.yourcompany.echocopy"
-export VERSION="1.0.4"
+export VERSION="1.0.7"
+export BUILD_NUMBER="7"
+export RELEASE_TAG="v1.0.7"
 ./build-and-notarize.sh
 ```
+
+The distribution build refuses to continue unless `VERSION`, `BUILD_NUMBER`,
+`RELEASE_TAG`, and `Sources/EchoCopy/Info.plist` agree. This prevents a GitHub
+release from advertising a version different from the app inside it.
 
 Keep `com.yourcompany.echocopy` for upgrades of the existing app. Changing the
 bundle identifier creates a new macOS Accessibility permission and preferences
@@ -81,7 +87,7 @@ After the build completes, run:
 
 ```bash
 # Replace with your actual values
-xcrun notarytool submit EchoCopy-1.0.4.dmg \
+xcrun notarytool submit EchoCopy-1.0.7.dmg \
   --apple-id your.email@example.com \
   --team-id YOUR_TEAM_ID \
   --password xxxx-xxxx-xxxx-xxxx \
@@ -98,24 +104,24 @@ Processing complete
 ### Step 6: Staple the Notarization
 
 ```bash
-xcrun stapler staple EchoCopy-1.0.4.dmg
+xcrun stapler staple EchoCopy-1.0.7.dmg
 ```
 
 ### Step 7: Verify
 
 ```bash
-spctl -a -vv -t install EchoCopy-1.0.4.dmg
+spctl -a -vv -t install EchoCopy-1.0.7.dmg
 ```
 
 You should see:
 ```
-EchoCopy-1.0.4.dmg: accepted
+EchoCopy-1.0.7.dmg: accepted
 source=Notarized Developer ID
 ```
 
 ### Step 8: Distribute!
 
-Your `EchoCopy-1.0.4.dmg` is now ready to distribute:
+Your `EchoCopy-1.0.7.dmg` is now ready to distribute:
 - Upload to your website
 - Share on GitHub Releases
 - Distribute directly to users
@@ -166,14 +172,18 @@ Common issues:
 
 ## Updating Your App
 
-1. Update version in `build-and-notarize.sh`:
+1. Update `CFBundleShortVersionString` and `CFBundleVersion` in
+   `Sources/EchoCopy/Info.plist`.
+
+2. Set matching release values:
    ```bash
-   VERSION="1.1.0"
+   export VERSION="1.1.0"
+   export BUILD_NUMBER="8"
+   export RELEASE_TAG="v1.1.0"
    ```
 
-2. Update `CFBundleShortVersionString` in `Info.plist`
-
-3. Rebuild, notarize, and distribute the new DMG
+3. Rebuild, notarize, and publish the DMG under exactly that release tag. The
+   build stops with an error if any version value disagrees.
 
 ---
 

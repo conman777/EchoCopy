@@ -98,6 +98,15 @@ enum ScreenshotClipboardShortcutConfiguration {
     }
 }
 
+enum ScreenshotShortcutRuntimePolicy {
+    static func shouldInstallEventTap(
+        automaticCaptureEnabled: Bool,
+        accessibilityTrusted: Bool
+    ) -> Bool {
+        automaticCaptureEnabled && accessibilityTrusted
+    }
+}
+
 struct ScreenshotShortcutReplacement {
     let controlDown: CGEvent
     let shortcutDown: CGEvent
@@ -216,7 +225,7 @@ final class ScreenshotCaptureCoordinator: @unchecked Sendable {
         startingPasteboardChangeCount: Int,
         now: Date = Date()
     ) -> Bool {
-        guard automaticallyCopiesScreenshots,
+        guard isAutomaticClipboardCaptureEnabled,
               (screenshotTargetProvider()?.lowercased() ?? "file") == "file" else {
             return false
         }
@@ -286,11 +295,11 @@ final class ScreenshotCaptureCoordinator: @unchecked Sendable {
         lock.unlock()
     }
 
-    private var automaticallyCopiesScreenshots: Bool {
+    var isAutomaticClipboardCaptureEnabled: Bool {
         guard userDefaults.object(
             forKey: Self.automaticClipboardPreferenceKey
         ) != nil else {
-            return true
+            return false
         }
         return userDefaults.bool(forKey: Self.automaticClipboardPreferenceKey)
     }

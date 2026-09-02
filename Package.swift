@@ -17,9 +17,6 @@ let package = Package(
             name: "EchoCopy",
             exclude: [
                 "Info.plist"
-            ],
-            swiftSettings: [
-                .unsafeFlags(["-suppress-warnings"], .when(configuration: .debug)),
             ]
         ),
         .testTarget(

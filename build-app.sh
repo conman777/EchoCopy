@@ -10,6 +10,23 @@ CONTENTS_DIR="${APP_BUNDLE}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 ZIP_PATH="${DIST_DIR}/${APP_NAME}.app.zip"
 BUNDLE_ID="${BUNDLE_ID:-com.yourcompany.echocopy}"
+SOURCE_INFO_PLIST="Sources/EchoCopy/Info.plist"
+
+bash scripts/verify-release-version.sh "${SOURCE_INFO_PLIST}"
+SOURCE_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${SOURCE_INFO_PLIST}")"
+SOURCE_BUILD_NUMBER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${SOURCE_INFO_PLIST}")"
+VERSION="${VERSION:-${SOURCE_VERSION}}"
+BUILD_NUMBER="${BUILD_NUMBER:-${SOURCE_BUILD_NUMBER}}"
+
+if [[ "${VERSION}" != "${SOURCE_VERSION}" ]]; then
+  echo "❌ VERSION=${VERSION} does not match ${SOURCE_INFO_PLIST} (${SOURCE_VERSION}). Update the source plist first." >&2
+  exit 1
+fi
+
+if [[ "${BUILD_NUMBER}" != "${SOURCE_BUILD_NUMBER}" ]]; then
+  echo "❌ BUILD_NUMBER=${BUILD_NUMBER} does not match ${SOURCE_INFO_PLIST} (${SOURCE_BUILD_NUMBER}). Update the source plist first." >&2
+  exit 1
+fi
 
 find_default_signing_identity() {
   local identities prefix candidate
@@ -77,15 +94,14 @@ mkdir -p "${CONTENTS_DIR}/Resources"
 cp "${BUILD_DIR}/${APP_NAME}" "${MACOS_DIR}/${APP_NAME}"
 
 # Copy Info.plist (used when the bundle is launched via Finder)
-cp "Sources/EchoCopy/Info.plist" "${CONTENTS_DIR}/Info.plist"
+cp "${SOURCE_INFO_PLIST}" "${CONTENTS_DIR}/Info.plist"
 
-# Optional overrides
+# Embed the canonical source metadata; mismatched environment overrides were
+# rejected before the build started.
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${BUNDLE_ID}" "${CONTENTS_DIR}/Info.plist"
-
-if [[ -n "${VERSION:-}" ]]; then
-  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "${CONTENTS_DIR}/Info.plist" || true
-  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION}" "${CONTENTS_DIR}/Info.plist" || true
-fi
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "${CONTENTS_DIR}/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_NUMBER}" "${CONTENTS_DIR}/Info.plist"
+bash scripts/verify-release-version.sh "${CONTENTS_DIR}/Info.plist"
 
 # Re-sign the assembled local bundle. SwiftPM signs the standalone executable,
 # but that signature is no longer valid after it is placed inside an app bundle.

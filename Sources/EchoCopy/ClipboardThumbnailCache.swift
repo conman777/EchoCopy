@@ -5,7 +5,7 @@ import ImageIO
 enum ClipboardThumbnailDecoder {
     static func makeThumbnail(
         fromBase64 content: String,
-        maximumPixelSize: Int = 560
+        maximumPixelSize: Int = 320
     ) -> CGImage? {
         guard maximumPixelSize > 0,
               let data = Data(base64Encoded: content),
@@ -55,8 +55,8 @@ final class ClipboardThumbnailCache {
     private var pendingCompletions: [UUID: [Completion]] = [:]
 
     private init() {
-        cache.countLimit = 60
-        cache.totalCostLimit = 32 * 1_024 * 1_024
+        cache.countLimit = 32
+        cache.totalCostLimit = 16 * 1_024 * 1_024
     }
 
     func load(
@@ -102,5 +102,9 @@ final class ClipboardThumbnailCache {
                 completions.forEach { $0(image) }
             }
         }
+    }
+
+    func removeAll() {
+        cache.removeAllObjects()
     }
 }
