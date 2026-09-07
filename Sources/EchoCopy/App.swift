@@ -749,7 +749,7 @@ struct MenuBarHistoryView: View {
     @ObservedObject var history: ClipboardHistory
     let onPaste: (ClipboardItem) -> Void
     let onOpenWindow: () -> Void
-    let onOpenSettings: () -> Void
+    let onPrepareForSettings: () -> Void
     let onQuit: () -> Void
 
     static let width: CGFloat = 360
@@ -817,8 +817,10 @@ struct MenuBarHistoryView: View {
                 .help("Clear history except pinned items")
                 .accessibilityHint("Removes all history items except pinned items")
 
-                Button("Settings", action: onOpenSettings)
-                    .buttonStyle(.plain)
+                SettingsButton(beforeOpen: onPrepareForSettings) {
+                    Text("Settings")
+                }
+                .buttonStyle(.plain)
 
                 Button("Quit", action: onQuit)
                     .buttonStyle(.plain)
@@ -918,9 +920,8 @@ class MenuBarManager: NSObject, NSPopoverDelegate {
                 self?.closePopover()
                 self?.appDelegate?.showMainWindow()
             },
-            onOpenSettings: { [weak self] in
+            onPrepareForSettings: { [weak self] in
                 self?.closePopover()
-                self?.appDelegate?.showSettings()
             },
             onQuit: { [weak self] in
                 self?.closePopover()
@@ -1497,21 +1498,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         lastExternalApplication = currentApplication
     }
 
-    @objc func showSettings() {
-        NSApp.activate(ignoringOtherApps: true)
-        
-        // Use the standard action but ensure it has a target
-        if !NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) {
-            // Fallback: try to find a window with "Settings" in title
-            for window in NSApp.windows {
-                if window.title.contains("Settings") || window.frameAutosaveName.contains("Settings") {
-                    window.makeKeyAndOrderFront(nil)
-                    return
-                }
-            }
-        }
-    }
-
     deinit {
         memoryReliefWorkItem?.cancel()
     }
@@ -1553,9 +1539,7 @@ struct ContentView: View {
                         
                         Spacer()
                         
-                        Button {
-                            appDelegate.showSettings()
-                        } label: {
+                        SettingsButton {
                             Image(systemName: "slider.horizontal.3")
                                 .font(.system(size: 11, weight: .bold))
                                 .foregroundColor(.secondary)
