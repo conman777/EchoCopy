@@ -2,7 +2,6 @@ import SwiftUI
 import AppKit
 import Foundation
 import Combine
-import Observation
 import ApplicationServices
 import Carbon.HIToolbox
 import ImageIO
@@ -148,6 +147,7 @@ class ClipboardHistory: ObservableObject {
     private let persistenceCoordinator: HistoryPersistenceCoordinator
     private var persistenceGeneration = 0
     private var persistenceBlocked = false
+    private var hasLoadedHistory = false
     private let defaultExcludedApps: Set<String> = [
         "com.1password.1password",           // 1Password
         "com.agilebits.onepassword7",        // 1Password 7
@@ -235,12 +235,6 @@ class ClipboardHistory: ObservableObject {
         scheduleHistorySave()
     }
 
-    func removeItem(at index: Int) {
-        guard index >= 0 && index < items.count else { return }
-        items.remove(at: index)
-        scheduleHistorySave()
-    }
-
     func removeItem(id: UUID) {
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
         items.remove(at: index)
@@ -296,11 +290,7 @@ class ClipboardHistory: ObservableObject {
     }
 
     private func scheduleHistorySave() {
-        guard !persistenceBlocked else {
-            canRetryHistoryUnlock = true
-            persistenceError = keychainRepairMessage
-            return
-        }
+        guard !persistenceBlocked else { return }
 
         persistenceGeneration &+= 1
         let generation = persistenceGeneration
@@ -371,7 +361,6 @@ class ClipboardHistory: ObservableObject {
     func retryHistoryUnlock() {
         guard canRetryHistoryUnlock else { return }
 
-        persistenceBlocked = false
         loadHistory(
             allowKeychainInteraction: true,
             preserveItemsOnFailure: true
@@ -390,6 +379,8 @@ class ClipboardHistory: ObservableObject {
                 persistenceBlocked = false
                 canRetryHistoryUnlock = false
                 persistenceError = nil
+                hasLoadedHistory = true
+                if !items.isEmpty { scheduleHistorySave() }
                 return
             }
 
@@ -401,15 +392,28 @@ class ClipboardHistory: ObservableObject {
                     filename: $0.filename
                 )
             }
-            let itemCountBeforeBudget = sanitizedItems.count
-            items = sanitizedItems
-            enforceItemCountLimit()
-            if items.count != decoded.count || items.count != itemCountBeforeBudget {
-                scheduleHistorySave()
+            let sessionItems = items
+            if preserveItemsOnFailure {
+                if !hasLoadedHistory {
+                    // Keep session edits when an item also exists on disk.
+                    let sessionIDs = Set(sessionItems.map(\.id))
+                    let merged = sessionItems + sanitizedItems.filter { !sessionIDs.contains($0.id) }
+                    items = merged.filter(\.isPinned)
+                        + merged.filter { !$0.isPinned }.sorted { $0.timestamp > $1.timestamp }
+                }
+                // After a save failure, memory already contains the full history,
+                // including deletions. Do not restore the older disk snapshot.
+            } else {
+                items = sanitizedItems
             }
+            enforceItemCountLimit()
+            hasLoadedHistory = true
             persistenceBlocked = false
             canRetryHistoryUnlock = false
             persistenceError = nil
+            if items.map(\.id) != decoded.map(\.id) || !sessionItems.isEmpty {
+                scheduleHistorySave()
+            }
         } catch {
             if !preserveItemsOnFailure {
                 items = []
@@ -418,7 +422,7 @@ class ClipboardHistory: ObservableObject {
             if requiresUnlock {
                 historyStore.recordKeychainRepairRequired()
             }
-            persistenceBlocked = requiresUnlock
+            persistenceBlocked = true
             canRetryHistoryUnlock = requiresUnlock
             persistenceError = requiresUnlock
                 ? keychainRepairMessage
@@ -646,7 +650,12 @@ class ClipboardMonitor {
         // Check for URL
         if let urls = pasteboard.readObjects(forClasses: [NSURL.self]) as? [NSURL],
            let url = urls.first {
-            history.addItem(url.absoluteString ?? "", contentType: .url)
+            let fileURL = url as URL
+            history.addItem(
+                fileURL.absoluteString,
+                contentType: fileURL.isFileURL ? .file : .url,
+                filename: fileURL.isFileURL ? fileURL.lastPathComponent : nil
+            )
             return
         }
 
@@ -800,6 +809,14 @@ struct MenuBarHistoryView: View {
 
                 Spacer(minLength: 8)
 
+                Button("Clear") {
+                    history.clearUnpinnedHistory()
+                }
+                .buttonStyle(.plain)
+                .disabled(!history.items.contains { !$0.isPinned })
+                .help("Clear history except pinned items")
+                .accessibilityHint("Removes all history items except pinned items")
+
                 Button("Settings", action: onOpenSettings)
                     .buttonStyle(.plain)
 
@@ -854,12 +871,14 @@ struct MenuBarHistoryRow: View {
 }
 
 @MainActor
-class MenuBarManager: NSObject {
+class MenuBarManager: NSObject, NSPopoverDelegate {
     private var statusItem: NSStatusItem?
     private let popover = NSPopover()
     private weak var history: ClipboardHistory?
     private weak var appDelegate: AppDelegate?
     private var historySubscription: AnyCancellable?
+    private var outsideClickMonitor: Any?
+    private var localClickMonitor: Any?
 
     init(history: ClipboardHistory, appDelegate: AppDelegate) {
         self.history = history
@@ -910,6 +929,7 @@ class MenuBarManager: NSObject {
         )
 
         popover.behavior = .transient
+        popover.delegate = self
         popover.animates = true
         popover.contentViewController = NSHostingController(rootView: content)
         updatePopoverSize(for: history.items.count)
@@ -948,6 +968,48 @@ class MenuBarManager: NSObject {
 
     private func closePopover() {
         popover.performClose(nil)
+    }
+
+    func popoverDidShow(_ notification: Notification) {
+        stopMonitoringClicks()
+        let clicks: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        // Accessory apps can show a popover without becoming active, so
+        // transient behavior alone does not reliably dismiss outside clicks.
+        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: clicks) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.closePopover()
+            }
+        }
+        localClickMonitor = NSEvent.addLocalMonitorForEvents(matching: clicks) { [weak self] event in
+            MainActor.assumeIsolated {
+                guard let self else { return event }
+                if event.window !== self.popover.contentViewController?.view.window,
+                   event.window !== self.statusItem?.button?.window {
+                    self.closePopover()
+                }
+                return event
+            }
+        }
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        stopMonitoringClicks()
+    }
+
+    private func stopMonitoringClicks() {
+        if let outsideClickMonitor {
+            NSEvent.removeMonitor(outsideClickMonitor)
+            self.outsideClickMonitor = nil
+        }
+        if let localClickMonitor {
+            NSEvent.removeMonitor(localClickMonitor)
+            self.localClickMonitor = nil
+        }
+    }
+
+    deinit {
+        if let outsideClickMonitor { NSEvent.removeMonitor(outsideClickMonitor) }
+        if let localClickMonitor { NSEvent.removeMonitor(localClickMonitor) }
     }
 }
 
@@ -1216,20 +1278,21 @@ class MenuBarWindow: NSWindow {
     override func performMiniaturize(_ sender: Any?) {
         close()
     }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if modifiers == .command && event.charactersIgnoringModifiers == "m" {
+            close()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
 }
 
 // MARK: - Window Delegate
 
 class MenuBarWindowDelegate: NSObject, NSWindowDelegate {
     var onWindowClosed: ((NSWindow) -> Void)?
-
-    func windowShouldClose(_ sender: NSWindow) -> Bool {
-        true
-    }
-
-    func window(_ window: NSWindow, willUseFullScreenPresentationOptions options: NSApplication.PresentationOptions = []) -> NSApplication.PresentationOptions {
-        return options
-    }
 
     func windowDidResignKey(_ notification: Notification) {
         if let window = notification.object as? NSWindow {
@@ -1253,23 +1316,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     var menuBarManager: MenuBarManager?
     var shortcutHandler: GlobalShortcutHandler?
     var windowDelegate: MenuBarWindowDelegate?
-    var localEventMonitor: Any?
-    var windowMiniaturizeObservers: [ObjectIdentifier: NSObjectProtocol] = [:]
     weak var history: ClipboardHistory?
-    weak var clipboardMonitor: ClipboardMonitor?
     private weak var lastExternalApplication: NSRunningApplication?
     private var hasAppliedPreferredSize = false
     private var memoryReliefWorkItem: DispatchWorkItem?
 
     func updateAccessibilityStatus(_ trusted: Bool) {
-        if Thread.isMainThread {
-            if accessibilityTrusted != trusted {
-                accessibilityTrusted = trusted
-            }
-        } else {
-            DispatchQueue.main.async { [weak self] in
-                self?.updateAccessibilityStatus(trusted)
-            }
+        if accessibilityTrusted != trusted {
+            accessibilityTrusted = trusted
         }
     }
 
@@ -1293,11 +1347,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Hide dock icon
-        NSApp.setActivationPolicy(.accessory)
-
-        // Setup menu bar and keyboard shortcuts
-        // Ensure history is set before proceeding
         guard let history = history else {
             print("Warning: ClipboardHistory not initialized")
             return
@@ -1307,11 +1356,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
         menuBarManager = MenuBarManager(history: history, appDelegate: self)
         shortcutHandler = GlobalShortcutHandler(appDelegate: self)
-
-        // Setup window delegate for all windows - do this after a small delay to ensure windows are ready
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            self?.setupWindowBehavior()
-        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -1340,25 +1384,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         configureWindow(window)
     }
 
-    private func setupWindowBehavior() {
-        // Add local event monitor to intercept Cmd+M as a backup
-        if localEventMonitor == nil {
-            localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                // Check for Cmd+M
-                let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-                if modifiers == .command && event.charactersIgnoringModifiers == "m" {
-                    // Hide window to menu bar instead of minimizing
-                    if let window = self?.mainWindow, window.isVisible {
-                        window.orderOut(nil)
-                        return nil  // Consume the event
-                    }
-                }
-                return event  // Pass through other events
-            }
-        }
-
-    }
-
     private func configureWindow(_ window: NSWindow) {
         if windowDelegate == nil {
             let delegate = MenuBarWindowDelegate()
@@ -1372,51 +1397,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             windowDelegate = delegate
         }
 
-        // Configure window to behave like an NSPanel (menu bar window)
-        // This prevents minimize to dock behavior
         window.delegate = windowDelegate
-
-        // Hide when app loses focus (key NSPanel behavior)
         window.hidesOnDeactivate = true
-
-        // Make it a floating window
         window.level = .floating
 
-        // Configure collection behavior for proper floating window behavior
         var collectionBehavior = window.collectionBehavior
         collectionBehavior.insert(.canJoinAllSpaces)
         collectionBehavior.insert(.fullScreenAuxiliary)
         collectionBehavior.insert(.transient)
         window.collectionBehavior = collectionBehavior
 
-        // Hide the minimize and zoom buttons completely
-        if let miniButton = window.standardWindowButton(.miniaturizeButton) {
-            miniButton.isHidden = true
-            // Intercept just in case the button remains visible due to style changes
-            miniButton.target = self
-            miniButton.action = #selector(handleMiniaturizeButton(_:))
-        }
+        window.standardWindowButton(.miniaturizeButton)?.isHidden = true
         window.standardWindowButton(.zoomButton)?.isHidden = true
 
         // Remove Dock minimization entirely
         window.styleMask.remove(.miniaturizable)
-        window.isReleasedWhenClosed = true
+        // AppDelegate owns the window through `mainWindow`. Under Swift ARC,
+        // AppKit's legacy self-release-on-close behavior would add a second
+        // release after `windowWillClose` clears that strong reference.
+        window.isReleasedWhenClosed = false
 
-        // As a fallback, observe miniaturize attempts and immediately hide instead
-        let windowID = ObjectIdentifier(window)
-        if windowMiniaturizeObservers[windowID] == nil {
-            let observer = NotificationCenter.default.addObserver(forName: NSWindow.willMiniaturizeNotification, object: window, queue: .main) { [weak self] note in
-                Task { @MainActor [weak self] in
-                    if let w = note.object as? NSWindow {
-                        w.orderOut(nil)
-                        self?.mainWindow = w
-                    }
-                }
-            }
-            windowMiniaturizeObservers[windowID] = observer
-        }
-
-        // Store reference
         self.mainWindow = window
 
         window.minSize = NSSize(width: 320, height: 400)
@@ -1444,20 +1444,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             deadline: .now() + 0.5,
             execute: workItem
         )
-    }
-
-    @objc private func handleMiniaturizeButton(_ sender: Any?) {
-        if let window = self.mainWindow {
-            window.orderOut(nil)
-        }
-    }
-
-    @objc func toggleMainWindow() {
-        if let window = mainWindow, window.isVisible {
-            window.orderOut(nil)
-        } else {
-            showMainWindow()
-        }
     }
 
     @objc func showMainWindow() {
@@ -1495,7 +1481,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     func pasteHistoryItem(_ item: ClipboardItem) {
         rememberCurrentExternalApplication()
         guard PasteboardWriter.write(item) else { return }
-        mainWindow?.orderOut(nil)
+        mainWindow?.close()
         PasteExecutor.pastePreparedClipboard(into: lastExternalApplication)
     }
 
@@ -1528,14 +1514,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     deinit {
         memoryReliefWorkItem?.cancel()
-        // Clean up event monitors
-        if let monitor = localEventMonitor {
-            NSEvent.removeMonitor(monitor)
-        }
-        // Clean up notification observers
-        for (_, observer) in windowMiniaturizeObservers {
-            NotificationCenter.default.removeObserver(observer)
-        }
     }
 }
 
@@ -1565,11 +1543,6 @@ struct ContentView: View {
             // Use Material background for a native feel
             VisualEffectView(material: .sidebar, blendingMode: .behindWindow)
                 .ignoresSafeArea()
-                .background(WindowAccessor { window in
-                    if let app = NSApp.delegate as? AppDelegate {
-                        app.applyWindowBehavior(to: window)
-                    }
-                })
 
             VStack(spacing: 0) {
                 // Compact Header
@@ -1927,6 +1900,11 @@ enum PasteboardWriter {
         let didWrite: Bool
 
         switch item.contentType {
+        case .url where URL(string: item.content)?.isFileURL == true:
+            // Older versions stored Finder file URLs as ordinary links.
+            guard let url = URL(string: item.content) else { return false }
+            pasteboard.clearContents()
+            didWrite = pasteboard.writeObjects([url as NSURL])
         case .text, .url:
             pasteboard.clearContents()
             didWrite = pasteboard.setString(item.content, forType: .string)
@@ -1943,8 +1921,10 @@ enum PasteboardWriter {
             pasteboard.clearContents()
             didWrite = pasteboard.setData(data, forType: pasteboardType)
         case .file:
+            let url = URL(string: item.content).flatMap { $0.isFileURL ? $0 : nil }
+                ?? URL(fileURLWithPath: item.content)
             pasteboard.clearContents()
-            didWrite = pasteboard.setString(item.content, forType: .string)
+            didWrite = pasteboard.writeObjects([url as NSURL])
         }
 
         if didWrite {
@@ -1975,34 +1955,6 @@ struct SectionHeader: View {
             .padding(.horizontal, 4)
             .padding(.top, 6)
             .padding(.bottom, 2)
-    }
-}
-
-// MARK: - Window Accessor
-
-final class _WindowDetectorView: NSView {
-    var onResolve: ((NSWindow) -> Void)?
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        if let w = self.window {
-            onResolve?(w)
-            // Run once
-            onResolve = nil
-        }
-    }
-}
-
-struct WindowAccessor: NSViewRepresentable {
-    let onResolve: (NSWindow) -> Void
-
-    func makeNSView(context: Context) -> _WindowDetectorView {
-        let v = _WindowDetectorView(frame: .zero)
-        v.onResolve = onResolve
-        return v
-    }
-
-    func updateNSView(_ nsView: _WindowDetectorView, context: Context) {
-        // No-op
     }
 }
 
@@ -2650,7 +2602,6 @@ struct EchoCopyApp: App {
 
         // Set up app delegate references before starting monitor
         appDelegate.history = historyInstance
-        appDelegate.clipboardMonitor = monitor
 
         // Start monitoring clipboard changes
         monitor.start()

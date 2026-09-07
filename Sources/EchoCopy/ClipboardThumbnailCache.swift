@@ -42,17 +42,11 @@ final class ClipboardThumbnailCache {
         }
     }
 
-    private typealias Completion = (CGImage?) -> Void
-
     private let cache = NSCache<NSUUID, ImageBox>()
     private let queue = DispatchQueue(
         label: "com.yourcompany.echocopy.thumbnail-decoding",
         qos: .userInitiated
     )
-
-    // Accessed only from `queue`. This prevents multiple visible SwiftUI views
-    // from decoding the same history item concurrently.
-    private var pendingCompletions: [UUID: [Completion]] = [:]
 
     private init() {
         cache.countLimit = 32
@@ -82,12 +76,6 @@ final class ClipboardThumbnailCache {
                 return
             }
 
-            if self.pendingCompletions[itemID] != nil {
-                self.pendingCompletions[itemID]?.append(completion)
-                return
-            }
-
-            self.pendingCompletions[itemID] = [completion]
             let image = ClipboardThumbnailDecoder.makeThumbnail(
                 fromBase64: base64Content
             )
@@ -97,9 +85,8 @@ final class ClipboardThumbnailCache {
                 self.cache.setObject(ImageBox(image), forKey: cacheKey, cost: cost)
             }
 
-            let completions = self.pendingCompletions.removeValue(forKey: itemID) ?? []
             DispatchQueue.main.async {
-                completions.forEach { $0(image) }
+                completion(image)
             }
         }
     }

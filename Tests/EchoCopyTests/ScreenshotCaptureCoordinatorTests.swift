@@ -6,6 +6,33 @@ import XCTest
 @testable import EchoCopy
 
 final class ScreenshotCaptureCoordinatorTests: XCTestCase {
+    func testClipboardShortcutAcceptsStringParametersFromMacOSPreferences() {
+        for (identifier, character, keyCode) in [("29", "51", kVK_ANSI_3), ("31", "52", kVK_ANSI_4)] {
+            let entry: [String: Any] = [
+                "enabled": "1",
+                "value": [
+                    "type": "standard",
+                    "parameters": [character, String(keyCode), "1441792"]
+                ]
+            ]
+            XCTAssertTrue(ScreenshotClipboardShortcutConfiguration.isEnabled(
+                for: CGKeyCode(keyCode), symbolicHotKeys: [identifier: entry]
+            ))
+        }
+    }
+
+    func testClipboardShortcutRejectsMalformedStringParameters() {
+        for parameters in [["52", "21", "invalid"], ["52", "21", "1441792.5"], ["52", "21", "1179648"]] {
+            let entry: [String: Any] = [
+                "enabled": "1",
+                "value": ["type": "standard", "parameters": parameters]
+            ]
+            XCTAssertFalse(ScreenshotClipboardShortcutConfiguration.isEnabled(
+                for: CGKeyCode(kVK_ANSI_4), symbolicHotKeys: ["31": entry]
+            ))
+        }
+    }
+
     func testEventTapRunsOnlyWhenScreenshotCaptureNeedsIt() {
         XCTAssertFalse(
             ScreenshotShortcutRuntimePolicy.shouldInstallEventTap(

@@ -58,18 +58,29 @@ enum ScreenshotClipboardShortcutConfiguration {
         guard let expected = expectedConfiguration(for: keyCode),
               let hotKeys = symbolicHotKeys as? [String: Any],
               let entry = hotKeys[expected.identifier] as? [String: Any],
-              let enabled = entry["enabled"] as? NSNumber,
-              enabled.boolValue,
+              let enabled = entry["enabled"],
+              ((enabled as? NSNumber)?.boolValue == true || (enabled as? String) == "1"),
               let value = entry["value"] as? [String: Any],
               (value["type"] as? String) == "standard",
-              let parameters = value["parameters"] as? [NSNumber],
+              let parameters = value["parameters"] as? [Any],
               parameters.count == 3 else {
             return false
         }
 
-        return parameters[0].intValue == expected.characterCode
-            && parameters[1].intValue == Int(keyCode)
-            && parameters[2].uint64Value == expected.modifiers
+        // macOS preferences can encode shortcut parameters as decimal strings
+        // as well as numbers. Reject anything that is not an unsigned integer.
+        let numericParameters = parameters.compactMap { parameter -> UInt64? in
+            if let number = parameter as? NSNumber {
+                return UInt64(number.stringValue)
+            }
+            if let string = parameter as? String {
+                return UInt64(string)
+            }
+            return nil
+        }
+        return numericParameters == [
+            UInt64(expected.characterCode), UInt64(keyCode), expected.modifiers
+        ]
     }
 
     private static func expectedConfiguration(
