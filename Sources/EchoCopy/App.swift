@@ -2194,14 +2194,9 @@ struct ClipboardItemRow: View {
 struct SettingsView: View {
     @EnvironmentObject var history: ClipboardHistory
     @EnvironmentObject var appDelegate: AppDelegate
-    @StateObject private var updateChecker = UpdateChecker()
     @AppStorage(ScreenshotCaptureCoordinator.automaticClipboardPreferenceKey)
     private var automaticallyCopyScreenshots = false
     @State private var selectedTab = 0
-
-    private var currentVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "Unknown"
-    }
 
     private var excludedAppNames: [String] {
         Array(Set(history.excludedApps.map(appName(from:)))).sorted()
@@ -2249,105 +2244,6 @@ struct SettingsView: View {
                 Label("General", systemImage: "gearshape")
             }
             .tag(0)
-
-            // Updates Tab
-            VStack(alignment: .leading, spacing: 16) {
-                Text("Updates")
-                    .font(.system(size: 20, weight: .bold))
-
-                // Current version info
-                HStack {
-                    Text("Current Version:")
-                        .foregroundColor(.secondary)
-                    Text(currentVersion)
-                        .fontWeight(.medium)
-                }
-
-                // Update status
-                GroupBox {
-                    VStack(alignment: .leading, spacing: 12) {
-                        if updateChecker.isChecking {
-                            HStack {
-                                ProgressView()
-                                    .scaleEffect(0.7)
-                                Text("Checking for updates...")
-                                    .foregroundColor(.secondary)
-                            }
-                        } else if let error = updateChecker.errorMessage {
-                            HStack {
-                                Image(systemName: "exclamationmark.triangle.fill")
-                                    .foregroundColor(.orange)
-                                Text(error)
-                                    .foregroundColor(.secondary)
-                            }
-                        } else if updateChecker.updateAvailable, let latestVersion = updateChecker.latestVersion {
-                            VStack(alignment: .leading, spacing: 8) {
-                                HStack {
-                                    Image(systemName: "arrow.down.circle.fill")
-                                        .foregroundColor(.green)
-                                        .font(.system(size: 20))
-                                    VStack(alignment: .leading) {
-                                        Text("Update Available!")
-                                            .fontWeight(.semibold)
-                                        Text("Version \(latestVersion) is available")
-                                            .font(.system(size: 12))
-                                            .foregroundColor(.secondary)
-                                    }
-                                }
-
-                                Button {
-                                    updateChecker.openReleasePage()
-                                } label: {
-                                    Text("Open Official Release Page")
-                                }
-                                .buttonStyle(.borderedProminent)
-
-                                Text("Download and install updates manually from the official release page.")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(.secondary)
-                            }
-                        } else if updateChecker.latestVersion != nil {
-                            HStack {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .foregroundColor(.green)
-                                Text("You're up to date!")
-                            }
-                        } else {
-                            HStack {
-                                Image(systemName: "info.circle")
-                                    .foregroundColor(.secondary)
-                                Text("Click below to check for updates")
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-
-                        Divider()
-
-                        HStack {
-                            Button("Check for Updates") {
-                                updateChecker.checkForUpdates()
-                            }
-                            .disabled(updateChecker.isChecking)
-
-                            Spacer()
-
-                            if let lastCheck = updateChecker.lastCheckDate {
-                                Text("Last checked: \(lastCheck.formatted(date: .omitted, time: .shortened))")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-                    }
-                    .padding(8)
-                }
-
-                Spacer()
-            }
-            .padding(20)
-            .tabItem {
-                Label("Updates", systemImage: "arrow.triangle.2.circlepath")
-            }
-            .tag(1)
 
             // App Exclusions Tab
             VStack(alignment: .leading, spacing: 16) {
@@ -2426,7 +2322,7 @@ struct SettingsView: View {
             .tabItem {
                 Label("Exclusions", systemImage: "shield")
             }
-            .tag(2)
+            .tag(1)
         }
         .frame(width: 560, height: 520)
     }
@@ -2464,100 +2360,6 @@ struct SettingsView: View {
         ]
 
         return knownApps[bundleID] ?? bundleID
-    }
-}
-
-// MARK: - Update Checker
-
-class UpdateChecker: ObservableObject {
-    @Published var updateAvailable = false
-    @Published var latestVersion: String?
-    @Published var isChecking = false
-    @Published var lastCheckDate: Date?
-    @Published var errorMessage: String?
-
-    // GitHub repo
-    private let githubOwner = "conman777"
-    private let githubRepo = "EchoCopy"
-    private let releasePageURL = URL(string: "https://github.com/conman777/EchoCopy/releases/latest")!
-
-    private var currentVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
-    }
-
-    func checkForUpdates() {
-        guard !isChecking else { return }
-
-        isChecking = true
-        errorMessage = nil
-
-        let urlString = "https://api.github.com/repos/\(githubOwner)/\(githubRepo)/releases/latest"
-        guard let url = URL(string: urlString) else {
-            DispatchQueue.main.async {
-                self.isChecking = false
-                self.errorMessage = "Invalid URL"
-            }
-            return
-        }
-
-        var request = URLRequest(url: url)
-        request.setValue("application/vnd.github.v3+json", forHTTPHeaderField: "Accept")
-        request.setValue("EchoCopy/\(currentVersion)", forHTTPHeaderField: "User-Agent")
-        request.timeoutInterval = 10
-
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                self.isChecking = false
-                self.lastCheckDate = Date()
-
-                if let error = error {
-                    self.errorMessage = "Network error: \(error.localizedDescription)"
-                    return
-                }
-
-                if let httpResponse = response as? HTTPURLResponse {
-                    if httpResponse.statusCode == 404 {
-                        self.errorMessage = "No releases found"
-                        self.updateAvailable = false
-                        return
-                    }
-
-                    if !(200...299).contains(httpResponse.statusCode) {
-                        self.errorMessage = "Update check failed (HTTP \(httpResponse.statusCode))"
-                        return
-                    }
-                }
-
-                guard let data = data else {
-                    self.errorMessage = "No data received"
-                    return
-                }
-
-                do {
-                    if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                       let tagName = json["tag_name"] as? String {
-
-                        let latestVersion = tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName
-                        self.latestVersion = latestVersion
-
-                        self.updateAvailable = UpdateVersionPolicy.updateAvailable(
-                            latest: latestVersion,
-                            current: self.currentVersion
-                        )
-                        self.errorMessage = nil
-                    } else {
-                        self.errorMessage = "Could not parse release info"
-                    }
-                } catch {
-                    self.errorMessage = "Parse error: \(error.localizedDescription)"
-                }
-            }
-        }.resume()
-    }
-
-    func openReleasePage() {
-        NSWorkspace.shared.open(releasePageURL)
     }
 }
 

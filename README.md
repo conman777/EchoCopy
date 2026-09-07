@@ -33,8 +33,7 @@ Automatically ignore data copied from sensitive apps like 1Password, Bitwarden, 
   <img src="screenshots/settings-new.png" alt="Settings and Exclusions" width="500">
 </p>
 
-### 🚀 Safe Update Checks
-The Settings menu checks the official GitHub release feed. Updates are opened on the official release page for manual download and installation; verify the notarized artifact before opening it.
+In-app update checks are temporarily unavailable.
 
 ---
 

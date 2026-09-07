@@ -3,51 +3,6 @@ import XCTest
 @testable import EchoCopy
 
 final class AppVersionTests: XCTestCase {
-    func testPublishedOneZeroSixIsNotAnUpdateForOneZeroSeven() {
-        XCTAssertFalse(
-            UpdateVersionPolicy.updateAvailable(
-                latest: "v1.0.6",
-                current: "1.0.7"
-            )
-        )
-    }
-
-    func testOnlyStrictlyNewerNumericVersionsAreUpdates() {
-        XCTAssertFalse(
-            UpdateVersionPolicy.updateAvailable(
-                latest: "1.0.7",
-                current: "1.0.7"
-            )
-        )
-        XCTAssertFalse(
-            UpdateVersionPolicy.updateAvailable(
-                latest: "1.0.7.0",
-                current: "1.0.7"
-            )
-        )
-        XCTAssertTrue(
-            UpdateVersionPolicy.updateAvailable(
-                latest: "1.0.8",
-                current: "1.0.7"
-            )
-        )
-    }
-
-    func testMalformedReleaseTagsDoNotProduceUpdatePrompts() {
-        XCTAssertFalse(
-            UpdateVersionPolicy.updateAvailable(
-                latest: "release-1.0.8",
-                current: "1.0.7"
-            )
-        )
-        XCTAssertFalse(
-            UpdateVersionPolicy.updateAvailable(
-                latest: "1.0.beta",
-                current: "1.0.7"
-            )
-        )
-    }
-
     func testSourceBundleMetadataUsesVersionOneZeroSeven() throws {
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
