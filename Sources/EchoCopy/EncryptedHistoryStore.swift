@@ -534,6 +534,7 @@ struct EncryptedHistoryStore {
         }
 
         if FileManager.default.fileExists(atPath: payloadFileURL.path) {
+            try securePayloadPermissions(at: payloadFileURL)
             return try Data(contentsOf: payloadFileURL, options: .mappedIfSafe)
         }
 
@@ -541,10 +542,12 @@ struct EncryptedHistoryStore {
             return nil
         }
 
-        // Migrate the already-encrypted payload atomically. Remove the old
-        // preferences value only after the file is safely in place.
-        try writePayloadFile(legacyPayload, to: payloadFileURL)
-        defaults.removeObject(forKey: storageKey)
+        // Plaintext legacy data must be encrypted by load() in memory before
+        // it reaches the history file, even if migration is interrupted.
+        if legacyPayload.starts(with: Self.envelopeMagic) {
+            try writePayloadFile(legacyPayload, to: payloadFileURL)
+            defaults.removeObject(forKey: storageKey)
+        }
         return legacyPayload
     }
 
@@ -565,7 +568,21 @@ struct EncryptedHistoryStore {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
+        // createDirectory does not repair permissions on an existing folder.
+        // Restrict it before the atomic write creates any temporary file.
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: directoryURL.path
+        )
         try payload.write(to: fileURL, options: .atomic)
+        try securePayloadPermissions(at: fileURL)
+    }
+
+    private func securePayloadPermissions(at fileURL: URL) throws {
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: fileURL.deletingLastPathComponent().path
+        )
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o600],
             ofItemAtPath: fileURL.path

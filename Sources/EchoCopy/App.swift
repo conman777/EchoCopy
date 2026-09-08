@@ -1316,6 +1316,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     var mainWindow: NSWindow?
     var menuBarManager: MenuBarManager?
     var shortcutHandler: GlobalShortcutHandler?
+    @Published var recordingMonitor: ScreenCaptureFileMonitor?
+    @Published var screenshotFileMonitor: ScreenCaptureFileMonitor?
     var windowDelegate: MenuBarWindowDelegate?
     weak var history: ClipboardHistory?
     private weak var lastExternalApplication: NSRunningApplication?
@@ -1356,11 +1358,50 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         rememberCurrentExternalApplication()
 
         menuBarManager = MenuBarManager(history: history, appDelegate: self)
-        shortcutHandler = GlobalShortcutHandler(appDelegate: self)
+        updateAccessibilityStatus(AXIsProcessTrusted())
+        // Preserve the native screenshot shortcut and floating thumbnail.
+        // Saved screenshots are copied by the folder monitor below.
+        if ProcessInfo.processInfo.environment["ECHOCOPY_DISABLE_GLOBAL_SHORTCUTS"] != "1" {
+            let monitor = ScreenCaptureFileMonitor { [weak history] url in
+                let item = ClipboardItem(content: url.absoluteString, contentType: .file,
+                                         filename: url.lastPathComponent)
+                if PasteboardWriter.write(item) {
+                    history?.addItem(item.content, contentType: .file, filename: item.filename)
+                    return true
+                }
+                return false
+            }
+            recordingMonitor = monitor
+            monitor.start()
+            let screenshots = ScreenCaptureFileMonitor(screenshots: true) { [weak history] url in
+                    let data = await Task.detached(priority: .utility) {
+                        guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+                              size <= ClipboardPolicy.maxImageBytes else { return Data?.none }
+                        guard let data = try? Data(contentsOf: url),
+                              let source = CGImageSourceCreateWithData(data as CFData, nil),
+                              CGImageSourceGetStatus(source) == .statusComplete,
+                              CGImageSourceCreateImageAtIndex(source, 0, nil) != nil else { return nil }
+                        return data
+                    }.value
+                    guard UserDefaults.standard.bool(forKey: ScreenshotCaptureCoordinator.automaticClipboardPreferenceKey),
+                          let data, data.count <= ClipboardPolicy.maxImageBytes else { return false }
+                    let item = ClipboardItem(content: data.base64EncodedString(), contentType: .image,
+                                             filename: url.lastPathComponent)
+                    if PasteboardWriter.write(item) {
+                        history?.addItem(item.content, contentType: .image, filename: item.filename)
+                        return true
+                    }
+                    return false
+            }
+            screenshotFileMonitor = screenshots
+            screenshots.start()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         memoryReliefWorkItem?.cancel()
+        recordingMonitor?.stop()
+        screenshotFileMonitor?.stop()
         // Persist the latest coalesced snapshot before an orderly quit.
         history?.flushPersistence()
     }
@@ -1368,7 +1409,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     func applicationDidBecomeActive(_ notification: Notification) {
         // Accessibility changes are applied when the user returns from System
         // Settings, with no perpetual permission polling while EchoCopy idles.
-        shortcutHandler?.refreshConfiguration()
+        updateAccessibilityStatus(AXIsProcessTrusted())
     }
 
     func applicationShouldHandleReopen(
@@ -2196,6 +2237,8 @@ struct SettingsView: View {
     @EnvironmentObject var appDelegate: AppDelegate
     @AppStorage(ScreenshotCaptureCoordinator.automaticClipboardPreferenceKey)
     private var automaticallyCopyScreenshots = false
+    @AppStorage(ScreenCaptureFileMonitor.preferenceKey)
+    private var automaticallyCopyRecordings = false
     @State private var selectedTab = 0
 
     private var excludedAppNames: [String] {
@@ -2209,6 +2252,14 @@ struct SettingsView: View {
                 Text("General")
                     .font(.system(size: 20, weight: .bold))
 
+                GroupBox("History Privacy") {
+                    Text("Saved history, including images and rich text, is encrypted with AES-256-GCM. Its key is kept in macOS Keychain. The system clipboard and separately saved screenshot files are outside this encryption.")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(8)
+                }
+
                 GroupBox {
                     VStack(alignment: .leading, spacing: 10) {
                         if !appDelegate.accessibilityTrusted {
@@ -2221,22 +2272,36 @@ struct SettingsView: View {
                         )
 
                         Text(
-                            "Standard Shift-Command-3 and Shift-Command-4 "
-                            + "captures remain saved in your "
-                            + "Screenshot location and are also added to the clipboard."
+                            "Apple’s floating screenshot preview stays available. After macOS saves the image to your Screenshot location, EchoCopy copies it automatically. Copying may wait until the preview disappears or is dismissed."
                         )
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
 
-                        Text("Off by default. Uses EchoCopy's existing Accessibility access; no Desktop-folder access is requested.")
+                        Text("Folder access may be required. No screenshot shortcut remapping or Accessibility access is needed for automatic copying.")
                             .font(.system(size: 11))
                             .foregroundColor(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
+                        if let monitor = appDelegate.screenshotFileMonitor {
+                            ScreenRecordingStatusView(monitor: monitor)
+                        }
                     }
                     .padding(8)
                 }
 
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("Copy completed screen recordings", isOn: $automaticallyCopyRecordings)
+                        Text("New macOS screen recordings in your Screenshot save folder are copied as video file attachments after saving. Folder access may be required. The video file itself is not encrypted by EchoCopy.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let monitor = appDelegate.recordingMonitor {
+                            ScreenRecordingStatusView(monitor: monitor)
+                        }
+                    }
+                    .padding(8)
+                }
                 Spacer()
             }
             .padding(20)
@@ -2324,7 +2389,7 @@ struct SettingsView: View {
             }
             .tag(1)
         }
-        .frame(width: 560, height: 520)
+        .frame(width: 560, height: 650)
     }
 
     private func chooseApplicationToExclude() {
@@ -2391,5 +2456,17 @@ struct EchoCopyApp: App {
 
         // Start monitoring clipboard changes
         monitor.start()
+    }
+}
+
+struct ScreenRecordingStatusView: View {
+    @ObservedObject var monitor: ScreenCaptureFileMonitor
+    var body: some View {
+        if !monitor.status.isEmpty {
+            Text(monitor.status)
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }

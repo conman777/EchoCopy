@@ -315,7 +315,7 @@ final class ScreenshotCaptureCoordinator: @unchecked Sendable {
         return userDefaults.bool(forKey: Self.automaticClipboardPreferenceKey)
     }
 
-    private static func systemScreenshotDirectory() -> URL {
+    static func systemScreenshotDirectory() -> URL {
         if let location = CFPreferencesCopyAppValue(
             "location" as CFString,
             "com.apple.screencapture" as CFString

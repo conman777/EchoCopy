@@ -50,6 +50,86 @@ final class EncryptedHistoryStoreTests: XCTestCase {
         )
     }
 
+    func testPlaintextMigrationNeverWritesPlaintextToHistoryFile() throws {
+        let context = makeContext()
+        defer { context.cleanup() }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("EchoCopyMigrationTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("history.enc")
+        let item = ClipboardItem(content: "legacy private text")
+        context.defaults.set(try JSONEncoder().encode([item]), forKey: context.storageKey)
+        context.keyProvider.onCreate = {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: file.path),
+                           "Plaintext must not reach the history file before encryption")
+        }
+        let store = EncryptedHistoryStore(
+            defaults: context.defaults, storageKey: context.storageKey,
+            encryptionVersionKey: context.versionKey, payloadFileURL: file,
+            keyProvider: context.keyProvider
+        )
+        XCTAssertEqual(try store.load(maximumPlaintextBytes: ClipboardPolicy.maxHistoryBytes)?.first?.content,
+                       item.content)
+        XCTAssertNil(context.defaults.data(forKey: context.storageKey))
+        let payload = try Data(contentsOf: file)
+        XCTAssertTrue(payload.starts(with: EncryptedHistoryStore.envelopeMagic))
+        XCTAssertNil(payload.range(of: Data(item.content.utf8)))
+    }
+
+    func testExistingStoragePermissionsAreRepairedOnSaveAndLoad() throws {
+        let context = makeContext()
+        defer { context.cleanup() }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("EchoCopyPermissionTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("history.enc")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
+        let store = EncryptedHistoryStore(
+            defaults: context.defaults, storageKey: context.storageKey,
+            encryptionVersionKey: context.versionKey, payloadFileURL: file,
+            keyProvider: context.keyProvider
+        )
+        let item = ClipboardItem(content: "private permission test")
+        try store.save([item], maximumPlaintextBytes: ClipboardPolicy.maxHistoryBytes)
+        func assertPrivatePermissions() throws {
+            let directoryAttributes = try FileManager.default.attributesOfItem(atPath: directory.path)
+            let fileAttributes = try FileManager.default.attributesOfItem(atPath: file.path)
+            XCTAssertEqual((directoryAttributes[.posixPermissions] as? NSNumber)?.intValue, 0o700)
+            XCTAssertEqual((fileAttributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        }
+        try assertPrivatePermissions()
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: file.path)
+        XCTAssertEqual(try store.load(maximumPlaintextBytes: ClipboardPolicy.maxHistoryBytes)?.first?.id,
+                       item.id)
+        try assertPrivatePermissions()
+    }
+
+    func testEverySaveUsesFreshCiphertextAndProtectsImageAndMetadata() throws {
+        let context = makeContext()
+        defer { context.cleanup() }
+        let item = ClipboardItem(
+            content: Data("synthetic image bytes".utf8).base64EncodedString(),
+            contentType: .image, isPinned: true, filename: "private-screenshot.png",
+            rtfContent: Data("synthetic rich text".utf8).base64EncodedString()
+        )
+        try context.store.save([item], maximumPlaintextBytes: ClipboardPolicy.maxHistoryBytes)
+        let first = try XCTUnwrap(context.defaults.data(forKey: context.storageKey))
+        try context.store.save([item], maximumPlaintextBytes: ClipboardPolicy.maxHistoryBytes)
+        let second = try XCTUnwrap(context.defaults.data(forKey: context.storageKey))
+        XCTAssertNotEqual(first, second)
+        for value in [item.content, item.filename!, item.rtfContent!, item.id.uuidString] {
+            XCTAssertNil(second.range(of: Data(value.utf8)))
+        }
+        let loaded = try XCTUnwrap(context.store.load(maximumPlaintextBytes: ClipboardPolicy.maxHistoryBytes)?.first)
+        XCTAssertEqual(loaded.content, item.content)
+        XCTAssertEqual(loaded.filename, item.filename)
+        XCTAssertEqual(loaded.rtfContent, item.rtfContent)
+        XCTAssertEqual(loaded.isPinned, item.isPinned)
+        XCTAssertEqual(loaded.timestamp, item.timestamp)
+    }
+
     func testEncryptedHistoryRoundTripsWithoutPersistingPlaintext() throws {
         let context = makeContext()
         defer { context.cleanup() }
@@ -323,6 +403,7 @@ final class EncryptedHistoryStoreTests: XCTestCase {
 private final class TestHistoryKeyProvider: HistoryKeyProviding {
     private var keyData: Data?
     private let failCreation: Bool
+    var onCreate: (() -> Void)?
 
     init(keyData: Data? = nil, failCreation: Bool = false) {
         self.keyData = keyData
@@ -334,6 +415,7 @@ private final class TestHistoryKeyProvider: HistoryKeyProviding {
     }
 
     func createKeyData() throws -> Data {
+        onCreate?()
         if failCreation {
             throw TestKeyProviderError.creationFailed
         }

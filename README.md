@@ -20,6 +20,9 @@ Copy images and see compact visual previews alongside the rest of your history. 
   <img src="screenshots/preview-new.png" alt="Clipboard History Previews" width="500">
 </p>
 
+### Screen Recordings to Clipboard
+Enable **Copy completed screen recordings** in Settings → General. EchoCopy watches only the macOS Screenshot save folder for new `.mov` screen recordings, waits for a stable, playable file, and copies its file URL for pasting into apps that accept video attachments. Existing recordings are ignored. Detection uses macOS screen-capture metadata or the standard “Screen Recording” filename. Keep the original video file to paste it again from history; EchoCopy encrypts the history reference, not the video file. macOS may ask for access to the save folder. Saving elsewhere or renaming a recording before detection may prevent automatic copying.
+
 ### ⚡ One-Click Menu History
 Click the EchoCopy menu-bar icon to see up to ten history rows at a time. Scroll the compact list to reach older items, then choose one to paste it into the app you were using. Open the full EchoCopy window when you want to search or manage pinned items.
 
@@ -65,7 +68,9 @@ Use `./run.sh` for subsequent local launches. It always opens the signed app bun
 
 ## Privacy & Permissions
 
-The one-click paste action and optional screenshot capture use the Accessibility permission managed in **System Settings → Privacy & Security → Accessibility**. EchoCopy checks that permission silently and never opens the authorization prompt automatically. Optional screenshot copying creates the saved screenshot file directly and does not scan or read your Desktop folder, so it does not request Desktop-folder access. Clipboard history is encrypted locally with AES-GCM using a key protected by the macOS Keychain, bounded to prevent oversized persistence, and never transmitted over the network. Password-manager and macOS Keychain/Passwords pasteboards are excluded by default; add other apps in Settings.
+The one-click paste action uses the Accessibility permission managed in **System Settings → Privacy & Security → Accessibility**. EchoCopy checks that permission silently and never opens the authorization prompt automatically. Optional screenshot copying watches the configured Screenshot save folder for new images. Apple’s native floating preview remains available; EchoCopy reacts to folder changes and copies the image after macOS saves it, normally after the preview disappears or is dismissed. A brief readiness check avoids copying incomplete images; failed copies are retried. Folder access may be required. Clipboard history is encrypted locally with AES-GCM using a key protected by the macOS Keychain, bounded to prevent oversized persistence, and never transmitted over the network. Password-manager and macOS Keychain/Passwords pasteboards are excluded by default; add other apps in Settings.
+
+History encryption covers text, images, rich text, filenames, timestamps, and pins. The history directory is restricted to the current user (0700), with its encrypted file at 0600; legacy plaintext is encrypted before file migration. The key is stored separately in Keychain. Encryption protects stored history, not the active macOS clipboard, the running app’s memory, or normal screenshot files exported to your Screenshot location. Existing files and OS backups are not encrypted or deleted by EchoCopy. Clearing active history also does not delete encrypted legacy recovery backups.
 
 For development builds, `build-app.sh` automatically selects an installed Apple Development or Developer ID certificate so Accessibility and Keychain grants survive rebuilds. It refuses to silently fall back to an ad-hoc signature; use `SIGNING_IDENTITY=- ./build-app.sh` only when you intentionally want a disposable build whose macOS permissions may need to be granted again.
 
