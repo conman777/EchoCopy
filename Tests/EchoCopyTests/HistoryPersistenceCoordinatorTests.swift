@@ -76,6 +76,33 @@ final class HistoryPersistenceCoordinatorTests: XCTestCase {
         XCTAssertEqual(loaded.map(\.id), [pinned.id, recent.id])
     }
 
+    func testByteBudgetDropsOldestUnpinnedItemsAndPersistsTheRest() throws {
+        let context = makeContext()
+        defer { context.cleanup() }
+
+        let pinned = ClipboardItem(
+            content: String(repeating: "p", count: 400),
+            contentType: .text,
+            isPinned: true
+        )
+        let recent = ClipboardItem(content: String(repeating: "r", count: 400), contentType: .text)
+        let oldest = ClipboardItem(content: String(repeating: "o", count: 400), contentType: .text)
+        let budget = try JSONEncoder().encode([pinned, recent]).count
+
+        let coordinator = HistoryPersistenceCoordinator(
+            historyStore: context.store,
+            maximumPlaintextBytes: budget,
+            debounceInterval: 10,
+            queue: DispatchQueue(label: "EchoCopyTests.persistence.byteBudget")
+        )
+
+        let persistedItems = try coordinator.flushSave([pinned, recent, oldest]).get()
+        XCTAssertEqual(persistedItems.map(\.id), [pinned.id, recent.id])
+
+        let loaded = try XCTUnwrap(context.store.load(maximumPlaintextBytes: budget))
+        XCTAssertEqual(loaded.map(\.id), [pinned.id, recent.id])
+    }
+
     private func makeContext() -> CoordinatorStoreContext {
         let suiteName = "EchoCopyTests.HistoryPersistenceCoordinator.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

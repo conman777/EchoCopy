@@ -3,6 +3,15 @@ import XCTest
 @testable import EchoCopy
 
 final class ClipboardPolicyTests: XCTestCase {
+    func testStoredHistoryAboveSaveBudgetStillLoads() {
+        // Lowering the save budget must never lock users out of history
+        // written under an earlier, larger budget.
+        XCTAssertGreaterThanOrEqual(
+            ClipboardPolicy.maxReadableHistoryBytes,
+            ClipboardPolicy.maxHistoryBytes
+        )
+    }
+
     func testClipboardAppTransitionAllowsSafeCopiesAndBlocksExcludedApps() {
         let excludedApps: Set<String> = ["com.password.manager"]
 

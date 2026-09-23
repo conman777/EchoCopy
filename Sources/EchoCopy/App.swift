@@ -373,7 +373,7 @@ class ClipboardHistory: ObservableObject {
     ) {
         do {
             guard let decoded = try historyStore.load(
-                maximumPlaintextBytes: ClipboardPolicy.maxHistoryBytes,
+                maximumPlaintextBytes: ClipboardPolicy.maxReadableHistoryBytes,
                 allowKeychainInteraction: allowKeychainInteraction
             ) else {
                 persistenceBlocked = false
@@ -781,13 +781,12 @@ struct MenuBarHistoryView: View {
                 ScrollView(.vertical) {
                     LazyVStack(spacing: 0) {
                         ForEach(Array(orderedItems.enumerated()), id: \.element.id) { index, item in
-                            Button {
-                                onPaste(item)
-                            } label: {
-                                MenuBarHistoryRow(item: item, index: index)
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityHint("Pastes this item into the previous app")
+                            MenuBarHistoryRow(
+                                item: item,
+                                index: index,
+                                onPaste: { onPaste(item) },
+                                onTogglePin: { history.togglePin(for: item) }
+                            )
                         }
                     }
                 }
@@ -839,6 +838,8 @@ struct MenuBarHistoryView: View {
 struct MenuBarHistoryRow: View {
     let item: ClipboardItem
     let index: Int
+    let onPaste: () -> Void
+    let onTogglePin: () -> Void
     @State private var isHovered = false
 
     private var preview: String {
@@ -854,21 +855,45 @@ struct MenuBarHistoryRow: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            Text("\(index + 1). \(preview)")
-                .font(.system(size: 13))
-                .foregroundColor(isHovered ? .white : .primary)
-                .lineLimit(1)
-                .truncationMode(.tail)
+            Button(action: onPaste) {
+                Text("\(index + 1). \(preview)")
+                    .font(.system(size: 13))
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(height: MenuBarHistoryView.rowHeight)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(index + 1). \(preview)")
+            .accessibilityHint("Pastes this item into the previous app")
+            .accessibilityAction(named: item.isPinned ? "Unpin" : "Pin", onTogglePin)
 
-            Spacer(minLength: 0)
+            Button(action: onTogglePin) {
+                Image(systemName: item.isPinned ? "pin.fill" : "pin")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(item.isPinned ? .orange : .secondary)
+                    .frame(width: 26, height: MenuBarHistoryView.rowHeight)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .opacity(isHovered || item.isPinned ? 1 : 0)
+            .help(item.isPinned ? "Unpin item" : "Pin item")
+            // VoiceOver reaches pinning through the row's named action, so the
+            // mostly-invisible icon would only add a duplicate stop per row.
+            .accessibilityHidden(true)
         }
-        .padding(.horizontal, 10)
+        .padding(.leading, 10)
+        .padding(.trailing, 6)
         .frame(height: MenuBarHistoryView.rowHeight)
         .frame(maxWidth: .infinity)
-        .background(isHovered ? Color.accentColor : Color.clear)
+        .background(isHovered ? Color.primary.opacity(0.08) : Color.clear)
         .contentShape(Rectangle())
         .onHover { isHovered = $0 }
-        .accessibilityLabel("\(index + 1). \(preview)")
+        .contextMenu {
+            Button(item.isPinned ? "Unpin" : "Pin", action: onTogglePin)
+        }
     }
 }
 

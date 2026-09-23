@@ -13,7 +13,13 @@ enum ClipboardPolicy {
     static let maxRTFBytes = 2 * 1024 * 1024
     static let maxImageBytes = 10 * 1024 * 1024
     static let maxScreenshotSourceBytes = 128 * 1024 * 1024
-    static let maxHistoryBytes = 25 * 1024 * 1024
+    /// Budget for each history save. The whole history is re-encoded and
+    /// re-encrypted on every change, so this bounds per-save CPU and memory.
+    static let maxHistoryBytes = 256 * 1024 * 1024
+    /// Largest stored history EchoCopy will open. Kept above the save budget so
+    /// history written under an earlier, larger budget still loads instead of
+    /// being locked out; the next save trims it to `maxHistoryBytes`.
+    static let maxReadableHistoryBytes = 1024 * 1024 * 1024
 
     private static let maxImageBase64Bytes = ((maxImageBytes + 2) / 3) * 4
     private static let maxRTFBase64Bytes = ((maxRTFBytes + 2) / 3) * 4

@@ -371,6 +371,16 @@ struct EncryptedHistoryStore {
         )
     }
 
+    /// Saves history the caller has already JSON-encoded as `[ClipboardItem]`,
+    /// so a large history is not encoded twice per save.
+    func save(encodedItems plaintext: Data, maximumPlaintextBytes: Int) throws {
+        try save(
+            plaintext: plaintext,
+            maximumPlaintextBytes: maximumPlaintextBytes,
+            keychainInteraction: .nonInteractive
+        )
+    }
+
     private func save(
         _ items: [ClipboardItem],
         maximumPlaintextBytes: Int,
@@ -383,6 +393,18 @@ struct EncryptedHistoryStore {
             throw EncryptedHistoryStoreError.encodingFailed
         }
 
+        try save(
+            plaintext: plaintext,
+            maximumPlaintextBytes: maximumPlaintextBytes,
+            keychainInteraction: keychainInteraction
+        )
+    }
+
+    private func save(
+        plaintext: Data,
+        maximumPlaintextBytes: Int,
+        keychainInteraction: KeychainInteraction
+    ) throws {
         guard plaintext.count <= maximumPlaintextBytes else {
             throw EncryptedHistoryStoreError.oversizedPayload
         }

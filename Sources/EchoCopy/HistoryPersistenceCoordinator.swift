@@ -91,16 +91,20 @@ final class HistoryPersistenceCoordinator {
 
     private func persist(_ items: [ClipboardItem]) -> Result<[ClipboardItem], Error> {
         Result {
-            let boundedItems = try itemsWithinStorageBudget(items)
+            let (boundedItems, encodedItems) = try itemsWithinStorageBudget(items)
             try historyStore.save(
-                boundedItems,
+                encodedItems: encodedItems,
                 maximumPlaintextBytes: maximumPlaintextBytes
             )
             return boundedItems
         }
     }
 
-    private func itemsWithinStorageBudget(_ items: [ClipboardItem]) throws -> [ClipboardItem] {
+    /// Returns the items that fit the budget along with their JSON encoding,
+    /// which is handed straight to the store instead of being encoded again.
+    private func itemsWithinStorageBudget(
+        _ items: [ClipboardItem]
+    ) throws -> (items: [ClipboardItem], encoded: Data) {
         let encoder = JSONEncoder()
         var boundedItems = items
 
@@ -113,8 +117,9 @@ final class HistoryPersistenceCoordinator {
         // The common path is a single array encoding. Previously every item
         // was encoded separately on every save even when the history was well
         // below its byte budget.
-        if try encoder.encode(boundedItems).count <= maximumPlaintextBytes {
-            return boundedItems
+        let encodedItems = try encoder.encode(boundedItems)
+        if encodedItems.count <= maximumPlaintextBytes {
+            return (boundedItems, encodedItems)
         }
 
         var sizedItems = try boundedItems.map {
@@ -144,7 +149,8 @@ final class HistoryPersistenceCoordinator {
         // Verify the estimate against JSONEncoder itself. This normally encodes
         // once; the loop is a defensive fallback if array encoding adds more
         // bytes than the per-item estimate on a future OS.
-        while try encoder.encode(boundedItems).count > maximumPlaintextBytes {
+        var encodedBoundedItems = try encoder.encode(boundedItems)
+        while encodedBoundedItems.count > maximumPlaintextBytes {
             guard !boundedItems.isEmpty else {
                 throw EncryptedHistoryStoreError.oversizedPayload
             }
@@ -152,8 +158,9 @@ final class HistoryPersistenceCoordinator {
             let removalIndex = boundedItems.lastIndex(where: { !$0.isPinned })
                 ?? boundedItems.count - 1
             boundedItems.remove(at: removalIndex)
+            encodedBoundedItems = try encoder.encode(boundedItems)
         }
 
-        return boundedItems
+        return (boundedItems, encodedBoundedItems)
     }
 }
