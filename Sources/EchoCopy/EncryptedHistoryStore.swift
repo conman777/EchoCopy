@@ -266,6 +266,7 @@ struct EncryptedHistoryStore {
     private let recoveryBackupEncryptionVersionKey: String
     private let keyProvider: any HistoryKeyProviding
     private let payloadFileURL: URL?
+    private let itemPayloadDirectoryURL: URL
 
     init(
         defaults: UserDefaults,
@@ -276,6 +277,7 @@ struct EncryptedHistoryStore {
         recoveryBackupKey: String? = nil,
         recoveryBackupEncryptionVersionKey: String? = nil,
         payloadFileURL: URL? = nil,
+        itemPayloadDirectoryURL: URL? = nil,
         keyProvider: any HistoryKeyProviding
     ) {
         self.defaults = defaults
@@ -290,6 +292,9 @@ struct EncryptedHistoryStore {
         self.recoveryBackupEncryptionVersionKey = recoveryBackupEncryptionVersionKey
             ?? "\(encryptionVersionKey).recoveryBackup"
         self.payloadFileURL = payloadFileURL
+        self.itemPayloadDirectoryURL = itemPayloadDirectoryURL
+            ?? FileManager.default.temporaryDirectory
+                .appendingPathComponent("EchoCopyPayloads-\(UUID().uuidString)", isDirectory: true)
         self.keyProvider = keyProvider
     }
 
@@ -347,11 +352,12 @@ struct EncryptedHistoryStore {
     }
 
     static func live() -> EncryptedHistoryStore {
-        let applicationSupportURL = FileManager.default.urls(
+        let echoCopyDirectoryURL = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
         ).first?
             .appendingPathComponent("EchoCopy", isDirectory: true)
+        let applicationSupportURL = echoCopyDirectoryURL?
             .appendingPathComponent("clipboard-history-v1.enc", isDirectory: false)
 
         return EncryptedHistoryStore(
@@ -359,6 +365,8 @@ struct EncryptedHistoryStore {
             storageKey: "clipboardHistory",
             encryptionVersionKey: "clipboardHistoryEncryptionVersion",
             payloadFileURL: applicationSupportURL,
+            itemPayloadDirectoryURL: echoCopyDirectoryURL?
+                .appendingPathComponent("payloads", isDirectory: true),
             keyProvider: KeychainHistoryKeyProvider()
         )
     }
@@ -409,22 +417,7 @@ struct EncryptedHistoryStore {
             throw EncryptedHistoryStoreError.oversizedPayload
         }
 
-        let keyData = try keyProvider.loadKeyData(interaction: keychainInteraction)
-            ?? keyProvider.createKeyData()
-        let key = try symmetricKey(from: keyData)
-        let sealedBox: AES.GCM.SealedBox
-        do {
-            sealedBox = try AES.GCM.seal(plaintext, using: key)
-        } catch {
-            throw EncryptedHistoryStoreError.encodingFailed
-        }
-
-        guard let combined = sealedBox.combined else {
-            throw EncryptedHistoryStoreError.encodingFailed
-        }
-
-        var payload = Self.envelopeMagic
-        payload.append(combined)
+        let payload = try sealPayload(plaintext, keychainInteraction: keychainInteraction)
         guard payload.count <= maximumPlaintextBytes + Self.maximumEnvelopeOverhead else {
             throw EncryptedHistoryStoreError.oversizedPayload
         }
@@ -494,24 +487,108 @@ struct EncryptedHistoryStore {
         return legacyItems
     }
 
+    private func sealPayload(
+        _ plaintext: Data,
+        keychainInteraction: KeychainInteraction
+    ) throws -> Data {
+        let keyData = try keyProvider.loadKeyData(interaction: keychainInteraction)
+            ?? keyProvider.createKeyData()
+        let key = try symmetricKey(from: keyData)
+        let sealedBox: AES.GCM.SealedBox
+        do {
+            sealedBox = try AES.GCM.seal(plaintext, using: key)
+        } catch {
+            throw EncryptedHistoryStoreError.encodingFailed
+        }
+
+        guard let combined = sealedBox.combined else {
+            throw EncryptedHistoryStoreError.encodingFailed
+        }
+
+        var payload = Data(capacity: Self.envelopeMagic.count + combined.count)
+        payload.append(Self.envelopeMagic)
+        payload.append(combined)
+        return payload
+    }
+
+    private func openSealedPayload(
+        _ payload: Data,
+        keychainInteraction: KeychainInteraction
+    ) throws -> Data {
+        guard payload.starts(with: Self.envelopeMagic) else {
+            throw EncryptedHistoryStoreError.authenticationFailed
+        }
+        guard let keyData = try keyProvider.loadKeyData(interaction: keychainInteraction) else {
+            throw EncryptedHistoryStoreError.missingKey
+        }
+        let key = try symmetricKey(from: keyData)
+
+        do {
+            let sealedBox = try AES.GCM.SealedBox(
+                combined: payload.dropFirst(Self.envelopeMagic.count)
+            )
+            return try AES.GCM.open(sealedBox, using: key)
+        } catch {
+            throw EncryptedHistoryStoreError.authenticationFailed
+        }
+    }
+
+    // MARK: - Item payloads
+
+    /// Large item payloads (images) live in their own encrypted files so the
+    /// history index stays small: it is held in memory and rewritten on every
+    /// change, while each payload is written once and read only on demand.
+    func saveItemPayload(_ data: Data, for itemID: UUID) throws {
+        let payload = try sealPayload(data, keychainInteraction: .nonInteractive)
+        try writePayloadFile(payload, to: itemPayloadURL(for: itemID))
+    }
+
+    func loadItemPayload(for itemID: UUID) throws -> Data {
+        let fileURL = itemPayloadURL(for: itemID)
+        let payload = try Data(contentsOf: fileURL, options: .mappedIfSafe)
+        return try openSealedPayload(payload, keychainInteraction: .nonInteractive)
+    }
+
+    /// Deletes payload files that no saved item references. Files modified
+    /// within `gracePeriod` are kept: a payload is written on the clipboard
+    /// queue just before its item reaches the in-memory history, so a save of
+    /// an older snapshot must not remove it in between.
+    func removeUnreferencedItemPayloads(
+        keeping referencedIDs: Set<UUID>,
+        gracePeriod: TimeInterval = 60,
+        now: Date = Date()
+    ) {
+        let fileURLs = (try? FileManager.default.contentsOfDirectory(
+            at: itemPayloadDirectoryURL,
+            includingPropertiesForKeys: [.contentModificationDateKey]
+        )) ?? []
+
+        for fileURL in fileURLs where fileURL.pathExtension == "enc" {
+            if let itemID = UUID(uuidString: fileURL.deletingPathExtension().lastPathComponent),
+               referencedIDs.contains(itemID) {
+                continue
+            }
+            let modified = (try? fileURL.resourceValues(
+                forKeys: [.contentModificationDateKey]
+            ))?.contentModificationDate ?? .distantPast
+            guard now.timeIntervalSince(modified) >= gracePeriod else { continue }
+            try? FileManager.default.removeItem(at: fileURL)
+        }
+    }
+
+    private func itemPayloadURL(for itemID: UUID) -> URL {
+        itemPayloadDirectoryURL.appendingPathComponent(
+            "\(itemID.uuidString).enc",
+            isDirectory: false
+        )
+    }
+
     private func decrypt(
         _ payload: Data,
         maximumPlaintextBytes: Int,
         keychainInteraction: KeychainInteraction
     ) throws -> [ClipboardItem] {
-        guard let keyData = try keyProvider.loadKeyData(interaction: keychainInteraction) else {
-            throw EncryptedHistoryStoreError.missingKey
-        }
-        let key = try symmetricKey(from: keyData)
-        let combined = Data(payload.dropFirst(Self.envelopeMagic.count))
-
-        let plaintext: Data
-        do {
-            let sealedBox = try AES.GCM.SealedBox(combined: combined)
-            plaintext = try AES.GCM.open(sealedBox, using: key)
-        } catch {
-            throw EncryptedHistoryStoreError.authenticationFailed
-        }
+        let plaintext = try openSealedPayload(payload, keychainInteraction: keychainInteraction)
 
         guard plaintext.count <= maximumPlaintextBytes else {
             throw EncryptedHistoryStoreError.oversizedPayload

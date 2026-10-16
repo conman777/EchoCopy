@@ -8,6 +8,7 @@ import ImageIO
 import OSLog
 import UniformTypeIdentifiers
 import Darwin
+import CryptoKit
 
 // MARK: - Data Models
 
@@ -20,12 +21,19 @@ enum ContentType: String, Codable, Sendable {
 
 struct ClipboardItem: Codable, Identifiable, Sendable {
     let id: UUID
-    let content: String  // Plain text, URL, or base64 for images
+    /// Plain text, URL, or file path. Images are stored in a separate
+    /// encrypted payload file and leave this empty; legacy or fallback image
+    /// items may still carry inline base64 here.
+    let content: String
     let contentType: ContentType
     let timestamp: Date
     let isPinned: Bool
     let filename: String?  // For file/image references
     let rtfContent: String?  // Rich Text Format (base64 encoded)
+    /// SHA-256 of an externally stored image payload. Keeps image bytes out
+    /// of the in-memory history and out of every history index save.
+    let payloadDigest: String?
+    let payloadByteCount: Int?
 
     init(
         id: UUID = UUID(),
@@ -34,7 +42,9 @@ struct ClipboardItem: Codable, Identifiable, Sendable {
         timestamp: Date = Date(),
         isPinned: Bool = false,
         filename: String? = nil,
-        rtfContent: String? = nil
+        rtfContent: String? = nil,
+        payloadDigest: String? = nil,
+        payloadByteCount: Int? = nil
     ) {
         self.id = id
         self.content = content
@@ -43,6 +53,41 @@ struct ClipboardItem: Codable, Identifiable, Sendable {
         self.isPinned = isPinned
         self.filename = filename
         self.rtfContent = rtfContent
+        self.payloadDigest = payloadDigest
+        self.payloadByteCount = payloadByteCount
+    }
+
+    var hasExternalPayload: Bool { payloadDigest != nil }
+
+    static func payloadDigest(of data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Image bytes, read from the encrypted payload file when stored
+    /// externally. The digest check rejects a payload file that belongs to a
+    /// different item.
+    func imageData(using store: EncryptedHistoryStore?) -> Data? {
+        guard contentType == .image else { return nil }
+        guard hasExternalPayload else { return Data(base64Encoded: content) }
+        guard let data = try? store?.loadItemPayload(for: id),
+              Self.payloadDigest(of: data) == payloadDigest else {
+            return nil
+        }
+        return data
+    }
+
+    func withPinned(_ isPinned: Bool) -> ClipboardItem {
+        ClipboardItem(
+            id: id,
+            content: content,
+            contentType: contentType,
+            timestamp: timestamp,
+            isPinned: isPinned,
+            filename: filename,
+            rtfContent: rtfContent,
+            payloadDigest: payloadDigest,
+            payloadByteCount: payloadByteCount
+        )
     }
 
     var searchableText: String {
@@ -143,7 +188,7 @@ class ClipboardHistory: ObservableObject {
     private let defaultExclusionsVersionKey = "defaultExclusionsVersion"
     private let defaultExclusionsVersion = 1
     private let keychainRepairMessage = "EchoCopy needs a one-time Keychain repair. Choose Repair Secure History."
-    private let historyStore: EncryptedHistoryStore
+    nonisolated let historyStore: EncryptedHistoryStore
     private let persistenceCoordinator: HistoryPersistenceCoordinator
     private var persistenceGeneration = 0
     private var persistenceBlocked = false
@@ -188,6 +233,48 @@ class ClipboardHistory: ObservableObject {
         )
     }
 
+    /// Inserts an item built by `makeImageItem` on a background queue.
+    func addPreparedItem(_ item: ClipboardItem) {
+        guard ClipboardPolicy.acceptsStoredItem(item) else { return }
+        insertItem(item)
+    }
+
+    /// Writes the image to its own encrypted payload file and returns an item
+    /// that references it, so the bytes never sit in the in-memory history.
+    /// Falls back to an inline item if the payload cannot be stored (for
+    /// example while the Keychain is locked); that history cannot be saved
+    /// either, so nothing inline reaches disk.
+    nonisolated func makeImageItem(_ data: Data, filename: String?) -> ClipboardItem? {
+        guard ClipboardPolicy.acceptsImagePasteboardData(byteCount: data.count) else {
+            return nil
+        }
+
+        let id = UUID()
+        do {
+            try historyStore.saveItemPayload(data, for: id)
+            return ClipboardItem(
+                id: id,
+                content: "",
+                contentType: .image,
+                filename: filename,
+                payloadDigest: ClipboardItem.payloadDigest(of: data),
+                payloadByteCount: data.count
+            )
+        } catch {
+            return ClipboardItem(
+                id: id,
+                content: data.base64EncodedString(),
+                contentType: .image,
+                filename: filename
+            )
+        }
+    }
+
+    /// Reads an image item's bytes from wherever they are stored.
+    nonisolated func imageData(for item: ClipboardItem) -> Data? {
+        item.imageData(using: historyStore)
+    }
+
     /// Inserts a payload that was already validated on the clipboard processing
     /// queue. This avoids decoding large base64 image/RTF values again on MainActor.
     func addPreparedItem(
@@ -213,7 +300,8 @@ class ClipboardHistory: ObservableObject {
            lastItem.content == newItem.content,
            lastItem.contentType == newItem.contentType,
            lastItem.filename == newItem.filename,
-           lastItem.rtfContent == newItem.rtfContent {
+           lastItem.rtfContent == newItem.rtfContent,
+           lastItem.payloadDigest == newItem.payloadDigest {
             return
         }
 
@@ -245,15 +333,7 @@ class ClipboardHistory: ObservableObject {
         guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
 
         let current = items.remove(at: index)
-        let updated = ClipboardItem(
-            id: current.id,
-            content: current.content,
-            contentType: current.contentType,
-            timestamp: current.timestamp,
-            isPinned: !current.isPinned,
-            filename: current.filename,
-            rtfContent: current.rtfContent
-        )
+        let updated = current.withPinned(!current.isPinned)
 
         if updated.isPinned {
             // Newly pinned items go to the very top.
@@ -384,14 +464,9 @@ class ClipboardHistory: ObservableObject {
                 return
             }
 
-            let sanitizedItems = decoded.filter {
-                ClipboardPolicy.acceptsStoredItem(
-                    content: $0.content,
-                    contentType: $0.contentType,
-                    rtfContent: $0.rtfContent,
-                    filename: $0.filename
-                )
-            }
+            let (sanitizedItems, didMovePayloads) = movingInlineImagesToPayloadFiles(
+                decoded.filter(ClipboardPolicy.acceptsStoredItem)
+            )
             let sessionItems = items
             if preserveItemsOnFailure {
                 if !hasLoadedHistory {
@@ -411,8 +486,19 @@ class ClipboardHistory: ObservableObject {
             persistenceBlocked = false
             canRetryHistoryUnlock = false
             persistenceError = nil
-            if items.map(\.id) != decoded.map(\.id) || !sessionItems.isEmpty {
+            if items.map(\.id) != decoded.map(\.id) || !sessionItems.isEmpty || didMovePayloads {
                 scheduleHistorySave()
+                if didMovePayloads {
+                    // The one-time migration decoded the whole legacy history.
+                    // Return those pages instead of keeping the high-water mark.
+                    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
+                        malloc_zone_pressure_relief(nil, 0)
+                    }
+                }
+            } else {
+                historyStore.removeUnreferencedItemPayloads(
+                    keeping: Set(items.lazy.filter(\.hasExternalPayload).map(\.id))
+                )
             }
         } catch {
             if !preserveItemsOnFailure {
@@ -428,6 +514,36 @@ class ClipboardHistory: ObservableObject {
                 ? keychainRepairMessage
                 : "Secure clipboard history could not be opened. EchoCopy will not overwrite it."
         }
+    }
+
+    /// Earlier versions stored every image inline as base64, so the whole
+    /// history (often hundreds of megabytes) lived in memory and was
+    /// re-encrypted on every change. Move those images out once.
+    private func movingInlineImagesToPayloadFiles(
+        _ items: [ClipboardItem]
+    ) -> (items: [ClipboardItem], didMove: Bool) {
+        var didMove = false
+        let migrated = items.map { item -> ClipboardItem in
+            guard item.contentType == .image,
+                  !item.hasExternalPayload,
+                  let data = Data(base64Encoded: item.content),
+                  (try? historyStore.saveItemPayload(data, for: item.id)) != nil else {
+                return item
+            }
+            didMove = true
+            return ClipboardItem(
+                id: item.id,
+                content: "",
+                contentType: .image,
+                timestamp: item.timestamp,
+                isPinned: item.isPinned,
+                filename: item.filename,
+                rtfContent: item.rtfContent,
+                payloadDigest: ClipboardItem.payloadDigest(of: data),
+                payloadByteCount: data.count
+            )
+        }
+        return (migrated, didMove)
     }
 
     private func enforceItemCountLimit() {
@@ -692,22 +808,15 @@ class ClipboardMonitor {
 
             let preparedImageData = savedScreenshot?.imageData ?? imageData
             let preparedFilename = savedScreenshot?.fileURL.lastPathComponent ?? filename
-            let base64 = preparedImageData.base64EncodedString()
-            guard ClipboardPolicy.acceptsStoredItem(
-                content: base64,
-                contentType: .image,
-                rtfContent: nil,
+            guard let item = self.history.makeImageItem(
+                preparedImageData,
                 filename: preparedFilename
             ) else {
                 return
             }
 
             DispatchQueue.main.async { [weak self] in
-                self?.history.addPreparedItem(
-                    base64,
-                    contentType: .image,
-                    filename: preparedFilename
-                )
+                self?.history.addPreparedItem(item)
             }
         }
     }
@@ -1410,13 +1519,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                     }.value
                     guard UserDefaults.standard.bool(forKey: ScreenshotCaptureCoordinator.automaticClipboardPreferenceKey),
                           let data, data.count <= ClipboardPolicy.maxImageBytes else { return false }
-                    let item = ClipboardItem(content: data.base64EncodedString(), contentType: .image,
-                                             filename: url.lastPathComponent)
-                    if PasteboardWriter.write(item) {
-                        history?.addItem(item.content, contentType: .image, filename: item.filename)
-                        return true
+                    guard PasteboardWriter.writeImageData(data) else { return false }
+                    if let history {
+                        let filename = url.lastPathComponent
+                        let item = await Task.detached(priority: .utility) {
+                            history.makeImageItem(data, filename: filename)
+                        }.value
+                        if let item { history.addPreparedItem(item) }
                     }
-                    return false
+                    return true
             }
             screenshotFileMonitor = screenshots
             screenshots.start()
@@ -1547,7 +1658,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     func pasteHistoryItem(_ item: ClipboardItem) {
         rememberCurrentExternalApplication()
-        guard PasteboardWriter.write(item) else { return }
+        guard PasteboardWriter.write(item, payloadStore: history?.historyStore) else { return }
         mainWindow?.close()
         PasteExecutor.pastePreparedClipboard(into: lastExternalApplication)
     }
@@ -1945,7 +2056,8 @@ enum PasteboardWriter {
     static func write(
         _ item: ClipboardItem,
         to pasteboard: NSPasteboard = .general,
-        writeTracker: PasteboardWriteTracker = .shared
+        writeTracker: PasteboardWriteTracker = .shared,
+        payloadStore: EncryptedHistoryStore? = nil
     ) -> Bool {
         let didWrite: Bool
 
@@ -1963,13 +2075,10 @@ enum PasteboardWriter {
                 pasteboard.setData(rtfData, forType: .rtf)
             }
         case .image:
-            guard let data = Data(base64Encoded: item.content),
-                  let pasteboardType = imagePasteboardType(for: data) else {
+            guard let data = item.imageData(using: payloadStore) else {
                 return false
             }
-
-            pasteboard.clearContents()
-            didWrite = pasteboard.setData(data, forType: pasteboardType)
+            return writeImageData(data, to: pasteboard, writeTracker: writeTracker)
         case .file:
             let url = URL(string: item.content).flatMap { $0.isFileURL ? $0 : nil }
                 ?? URL(fileURLWithPath: item.content)
@@ -1981,6 +2090,25 @@ enum PasteboardWriter {
             writeTracker.recordInternalWrite(changeCount: pasteboard.changeCount)
         }
 
+        return didWrite
+    }
+
+    @MainActor
+    @discardableResult
+    static func writeImageData(
+        _ data: Data,
+        to pasteboard: NSPasteboard = .general,
+        writeTracker: PasteboardWriteTracker = .shared
+    ) -> Bool {
+        guard let pasteboardType = imagePasteboardType(for: data) else {
+            return false
+        }
+
+        pasteboard.clearContents()
+        let didWrite = pasteboard.setData(data, forType: pasteboardType)
+        if didWrite {
+            writeTracker.recordInternalWrite(changeCount: pasteboard.changeCount)
+        }
         return didWrite
     }
 
@@ -2009,8 +2137,8 @@ struct SectionHeader: View {
 }
 
 struct ClipboardImagePreview: View {
-    let itemID: UUID
-    let base64Content: String
+    let item: ClipboardItem
+    let payloadStore: EncryptedHistoryStore?
     var height: CGFloat = 72
 
     @State private var thumbnail: CGImage?
@@ -2042,9 +2170,11 @@ struct ClipboardImagePreview: View {
             guard !hasRequestedThumbnail else { return }
             hasRequestedThumbnail = true
 
+            let item = item
+            let payloadStore = payloadStore
             ClipboardThumbnailCache.shared.load(
-                itemID: itemID,
-                base64Content: base64Content
+                itemID: item.id,
+                imageData: { item.imageData(using: payloadStore) }
             ) { image in
                 thumbnail = image
             }
@@ -2100,8 +2230,8 @@ struct ClipboardItemRow: View {
             if item.contentType == .image {
                 HStack(spacing: 10) {
                     ClipboardImagePreview(
-                        itemID: item.id,
-                        base64Content: item.content,
+                        item: item,
+                        payloadStore: history.historyStore,
                         height: 72
                     )
                     .frame(width: 112)
@@ -2229,7 +2359,7 @@ struct ClipboardItemRow: View {
             }
 
             Button {
-                PasteboardWriter.write(item)
+                PasteboardWriter.write(item, payloadStore: history.historyStore)
             } label: {
                 Label("Copy to Clipboard", systemImage: "doc.on.doc")
             }

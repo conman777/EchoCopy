@@ -13,8 +13,8 @@ enum ClipboardPolicy {
     static let maxRTFBytes = 2 * 1024 * 1024
     static let maxImageBytes = 10 * 1024 * 1024
     static let maxScreenshotSourceBytes = 128 * 1024 * 1024
-    /// Budget for each history save. The whole history is re-encoded and
-    /// re-encrypted on every change, so this bounds per-save CPU and memory.
+    /// Budget for the stored history: the index plus external image payloads.
+    /// The index is re-encoded on every change; images are written once.
     static let maxHistoryBytes = 256 * 1024 * 1024
     /// Largest stored history EchoCopy will open. Kept above the save budget so
     /// history written under an earlier, larger budget still loads instead of
@@ -55,11 +55,24 @@ enum ClipboardPolicy {
             && !excludedBundleIDs.contains(currentBundleID)
     }
 
+    static func acceptsStoredItem(_ item: ClipboardItem) -> Bool {
+        acceptsStoredItem(
+            content: item.content,
+            contentType: item.contentType,
+            rtfContent: item.rtfContent,
+            filename: item.filename,
+            externalPayloadByteCount: item.hasExternalPayload
+                ? (item.payloadByteCount ?? -1)
+                : nil
+        )
+    }
+
     static func acceptsStoredItem(
         content: String,
         contentType: ContentType,
         rtfContent: String?,
-        filename: String? = nil
+        filename: String? = nil,
+        externalPayloadByteCount: Int? = nil
     ) -> Bool {
         let contentByteCount = content.lengthOfBytes(using: .utf8)
 
@@ -71,6 +84,13 @@ enum ClipboardPolicy {
         case .file:
             guard contentByteCount <= maxFilePathBytes else { return false }
         case .image:
+            if let externalPayloadByteCount {
+                guard content.isEmpty,
+                      acceptsImagePasteboardData(byteCount: externalPayloadByteCount) else {
+                    return false
+                }
+                break
+            }
             guard contentByteCount <= maxImageBase64Bytes,
                   let imageData = Data(base64Encoded: content),
                   imageData.count <= maxImageBytes else {

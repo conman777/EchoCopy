@@ -7,8 +7,15 @@ enum ClipboardThumbnailDecoder {
         fromBase64 content: String,
         maximumPixelSize: Int = 320
     ) -> CGImage? {
+        guard let data = Data(base64Encoded: content) else { return nil }
+        return makeThumbnail(from: data, maximumPixelSize: maximumPixelSize)
+    }
+
+    static func makeThumbnail(
+        from data: Data,
+        maximumPixelSize: Int = 320
+    ) -> CGImage? {
         guard maximumPixelSize > 0,
-              let data = Data(base64Encoded: content),
               let source = CGImageSourceCreateWithData(data as CFData, nil) else {
             return nil
         }
@@ -29,8 +36,8 @@ enum ClipboardThumbnailDecoder {
 }
 
 /// Decodes image previews away from the main thread and retains only a bounded
-/// set of reduced-size thumbnails. Full clipboard images remain in history and
-/// are decoded only when they are explicitly copied back to the pasteboard.
+/// set of reduced-size thumbnails. Full clipboard images stay in their encrypted
+/// payload files and are read only to build a thumbnail or to paste.
 final class ClipboardThumbnailCache {
     static let shared = ClipboardThumbnailCache()
 
@@ -55,7 +62,7 @@ final class ClipboardThumbnailCache {
 
     func load(
         itemID: UUID,
-        base64Content: String,
+        imageData: @escaping () -> Data?,
         completion: @escaping (CGImage?) -> Void
     ) {
         let cacheKey = itemID as NSUUID
@@ -76,9 +83,9 @@ final class ClipboardThumbnailCache {
                 return
             }
 
-            let image = ClipboardThumbnailDecoder.makeThumbnail(
-                fromBase64: base64Content
-            )
+            let image = imageData().flatMap {
+                ClipboardThumbnailDecoder.makeThumbnail(from: $0)
+            }
 
             if let image {
                 let cost = image.bytesPerRow * image.height

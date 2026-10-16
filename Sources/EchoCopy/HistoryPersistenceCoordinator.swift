@@ -96,6 +96,11 @@ final class HistoryPersistenceCoordinator {
                 encodedItems: encodedItems,
                 maximumPlaintextBytes: maximumPlaintextBytes
             )
+            // Only after the index no longer references them, so a failed
+            // save can never strand an item without its image.
+            historyStore.removeUnreferencedItemPayloads(
+                keeping: Set(boundedItems.lazy.filter(\.hasExternalPayload).map(\.id))
+            )
             return boundedItems
         }
     }
@@ -114,16 +119,25 @@ final class HistoryPersistenceCoordinator {
             boundedItems.remove(at: removalIndex)
         }
 
+        // The budget covers the index plus externally stored image payloads,
+        // so moving images out of the index does not let disk use grow.
+        func externalByteCount(_ items: [ClipboardItem]) -> Int {
+            items.reduce(0) { $0 + ($1.payloadByteCount ?? 0) }
+        }
+
         // The common path is a single array encoding. Previously every item
         // was encoded separately on every save even when the history was well
         // below its byte budget.
         let encodedItems = try encoder.encode(boundedItems)
-        if encodedItems.count <= maximumPlaintextBytes {
+        if encodedItems.count + externalByteCount(boundedItems) <= maximumPlaintextBytes {
             return (boundedItems, encodedItems)
         }
 
         var sizedItems = try boundedItems.map {
-            SizedItem(item: $0, encodedByteCount: try encoder.encode($0).count)
+            SizedItem(
+                item: $0,
+                encodedByteCount: try encoder.encode($0).count + ($0.payloadByteCount ?? 0)
+            )
         }
 
         var estimatedArrayByteCount = 2 // Opening and closing brackets.
@@ -150,7 +164,7 @@ final class HistoryPersistenceCoordinator {
         // once; the loop is a defensive fallback if array encoding adds more
         // bytes than the per-item estimate on a future OS.
         var encodedBoundedItems = try encoder.encode(boundedItems)
-        while encodedBoundedItems.count > maximumPlaintextBytes {
+        while encodedBoundedItems.count + externalByteCount(boundedItems) > maximumPlaintextBytes {
             guard !boundedItems.isEmpty else {
                 throw EncryptedHistoryStoreError.oversizedPayload
             }
