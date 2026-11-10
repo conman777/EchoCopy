@@ -1021,7 +1021,7 @@ class MenuBarManager: NSObject, NSPopoverDelegate {
         self.appDelegate = appDelegate
         super.init()
         setupMenuBar()
-        setupPopover(history: history)
+        // History views are only constructed after Touch ID succeeds.
         observeHistorySize()
     }
 
@@ -1047,11 +1047,11 @@ class MenuBarManager: NSObject, NSPopoverDelegate {
         let content = MenuBarHistoryView(
             history: history,
             onPaste: { [weak self] item in
-                self?.closePopover()
                 self?.appDelegate?.pasteHistoryItem(item)
+                self?.closePopover()
             },
             onOpenWindow: { [weak self] in
-                self?.closePopover()
+                self?.closePopover(lockHistory: false)
                 self?.appDelegate?.showMainWindow()
             },
             onPrepareForSettings: { [weak self] in
@@ -1065,7 +1065,7 @@ class MenuBarManager: NSObject, NSPopoverDelegate {
 
         popover.behavior = .transient
         popover.delegate = self
-        popover.animates = true
+        popover.animates = false
         popover.contentViewController = NSHostingController(rootView: content)
         updatePopoverSize(for: history.items.count)
     }
@@ -1094,15 +1094,19 @@ class MenuBarManager: NSObject, NSPopoverDelegate {
         }
 
         appDelegate?.prepareForHistoryInteraction()
-        popover.show(
-            relativeTo: button.bounds,
-            of: button,
-            preferredEdge: .minY
-        )
+        appDelegate?.authenticateHistoryAccess { [weak self, weak button] in
+            guard let self, let button, let history = self.history else { return }
+            self.setupPopover(history: history)
+            self.popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        }
     }
 
-    private func closePopover() {
+    private var transferringToWindow = false
+
+    func closePopover(lockHistory: Bool = true) {
+        transferringToWindow = !lockHistory
         popover.performClose(nil)
+        transferringToWindow = false
     }
 
     func popoverDidShow(_ notification: Notification) {
@@ -1129,6 +1133,9 @@ class MenuBarManager: NSObject, NSPopoverDelegate {
 
     func popoverDidClose(_ notification: Notification) {
         stopMonitoringClicks()
+        // Release previews and accessibility content as soon as history closes.
+        popover.contentViewController = nil
+        if !transferringToWindow { appDelegate?.historyAccess.lock() }
     }
 
     private func stopMonitoringClicks() {
@@ -1446,6 +1453,8 @@ class MenuBarWindowDelegate: NSObject, NSWindowDelegate {
 
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
+    let historyAccess = HistoryAccessController()
+    private var historyLockSubscription: AnyCancellable?
     @Published private(set) var accessibilityTrusted = true
     var mainWindow: NSWindow?
     var menuBarManager: MenuBarManager?
@@ -1491,6 +1500,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
         rememberCurrentExternalApplication()
 
+        historyLockSubscription = historyAccess.$isUnlocked.dropFirst().sink { [weak self] unlocked in
+            guard !unlocked else { return }
+            self?.mainWindow?.close()
+            self?.menuBarManager?.closePopover()
+        }
         menuBarManager = MenuBarManager(history: history, appDelegate: self)
         updateAccessibilityStatus(AXIsProcessTrusted())
         // Preserve the native screenshot shortcut and floating thumbnail.
@@ -1570,6 +1584,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 if self.mainWindow === closedWindow {
                     self.mainWindow = nil
                 }
+                self.historyAccess.lock()
                 self.releaseClosedWindowResources()
             }
             windowDelegate = delegate
@@ -1624,8 +1639,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         )
     }
 
+    func authenticateHistoryAccess(then action: @escaping () -> Void) {
+        NSApp.activate(ignoringOtherApps: true)
+        historyAccess.unlock(onFailure: { message in
+            let alert = NSAlert()
+            alert.messageText = "EchoCopy history is locked"
+            alert.informativeText = message
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        }, then: {
+            // Touch ID's system sheet can leave an accessory app inactive.
+            // Restore focus before constructing either authenticated view.
+            NSApp.activate(ignoringOtherApps: true)
+            action()
+        })
+    }
+
     @objc func showMainWindow() {
         rememberCurrentExternalApplication()
+        authenticateHistoryAccess { [weak self] in self?.showAuthenticatedMainWindow() }
+    }
+
+    private func showAuthenticatedMainWindow() {
+        guard historyAccess.isUnlocked else { return }
 
         if let window = mainWindow {
             configureWindow(window)
@@ -1657,10 +1693,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     func pasteHistoryItem(_ item: ClipboardItem) {
+        guard historyAccess.isUnlocked else { return }
         rememberCurrentExternalApplication()
         guard PasteboardWriter.write(item, payloadStore: history?.historyStore) else { return }
         mainWindow?.close()
         PasteExecutor.pastePreparedClipboard(into: lastExternalApplication)
+    }
+
+    func copyHistoryItem(_ item: ClipboardItem) {
+        guard historyAccess.isUnlocked else { return }
+        PasteboardWriter.write(item, payloadStore: history?.historyStore)
     }
 
     func prepareForHistoryInteraction() {
@@ -2189,6 +2231,7 @@ struct ClipboardImagePreview: View {
 }
 
 struct ClipboardItemRow: View {
+    @EnvironmentObject private var appDelegate: AppDelegate
     let item: ClipboardItem
     let history: ClipboardHistory
     let onPaste: (ClipboardItem) -> Void
@@ -2359,7 +2402,7 @@ struct ClipboardItemRow: View {
             }
 
             Button {
-                PasteboardWriter.write(item, payloadStore: history.historyStore)
+                appDelegate.copyHistoryItem(item)
             } label: {
                 Label("Copy to Clipboard", systemImage: "doc.on.doc")
             }
